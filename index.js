@@ -38,7 +38,7 @@ const flexTemplateString = `{
         "size": "md",
         "color": "#1C1B1F",
         "margin": "lg",
-        "lineSpacing": "md"
+        "lineSpacing": "10px"
       },
       {
         "type": "text",
@@ -53,13 +53,13 @@ const flexTemplateString = `{
   }
 }`;
 const factUrls = [
-    "https://www.thefactsite.com/fact-of-the-day/",
-    "https://www.thefactsite.com/random-facts/",
+    "https://www.thefactsite.com/1000-interesting-facts/",
+    "https://www.thefactsite.com/top-100-random-funny-facts/",
     "https://www.thefactsite.com/100-space-facts/",
-    "https://www.thefactsite.com/history-facts/",
-    "https://www.thefactsite.com/animal-facts/",
-    "https://www.thefactsite.com/technology-facts/",
-    "https://www.thefactsite.com/food-facts/"
+    "https://www.thefactsite.com/100-halloween-facts/",
+    "https://www.thefactsite.com/100-random-food-facts/",
+    "https://www.thefactsite.com/facts-everyone-should-know/",
+    "https://www.thefactsite.com/dinosaur-facts/"
 ];
 /**
  * Strips HTML tags and unescapes common HTML entities.
@@ -101,12 +101,12 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 2000) {
 }
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Supports dual structural parsing: <h2 class="list"> and <p class="list">.
+ * Uses refined regex boundaries and multi-paragraph accumulation.
  */
 function fetchFact(useBackup = false) {
     return withRetry(() => {
         const selectedUrl = useBackup
-            ? "https://www.thefactsite.com/random-facts/"
+            ? "https://www.thefactsite.com/1000-interesting-facts/"
             : factUrls[Math.floor(Math.random() * factUrls.length)];
         console.log(`[Scraper] Selected Target URL: ${selectedUrl}`);
         const response = UrlFetchApp.fetch(selectedUrl, {
@@ -120,28 +120,38 @@ function fetchFact(useBackup = false) {
             throw new Error(`HTTP Error ${statusCode} when fetching ${selectedUrl}`);
         }
         const html = response.getContentText();
-        // 1. Structure A: <h2 class="list">...</h2> followed by <p>
-        const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2|<div class="entry-content"|$)/gi;
+        // 1. Precise boundary Regex for <h2 class="list"> blocks
+        const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|<p>\s*(?:&nbsp;|\s)*<\/p>|<div class="entry-content"|$)/gi;
         let h2Match;
         const h2Results = [];
         while ((h2Match = h2Regex.exec(html)) !== null) {
             const titleRaw = h2Match[1];
             const title = cleanHtml(titleRaw);
             const afterChunk = h2Match[2];
-            const pMatch = afterChunk.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-            let pContent = "";
             let imageUrl = null;
-            if (pMatch) {
-                pContent = cleanHtml(pMatch[1]);
-                const imgMatch = pMatch[1].match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i) ||
-                    afterChunk.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+            const paragraphs = [];
+            const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+            let pMatch;
+            while ((pMatch = pRegex.exec(afterChunk)) !== null) {
+                const rawP = pMatch[1];
+                const imgMatch = rawP.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+                if (imgMatch && imgMatch[1] && !imageUrl) {
+                    imageUrl = imgMatch[1];
+                }
+                const cleanedP = cleanHtml(rawP);
+                if (cleanedP.length > 5 && !cleanedP.includes("Cookie") && !cleanedP.includes("Copyright")) {
+                    paragraphs.push(cleanedP);
+                }
+            }
+            if (!imageUrl) {
+                const imgMatch = afterChunk.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
                 if (imgMatch && imgMatch[1]) {
                     imageUrl = imgMatch[1];
                 }
             }
-            if (title.length > 5) {
-                const fullText = pContent ? `${title} — ${pContent}` : title;
-                h2Results.push({ text: fullText, imageUrl, targetUrl: selectedUrl });
+            if (title.length > 3) {
+                const fullContent = paragraphs.length > 0 ? `${title} — ${paragraphs.join("\n\n")}` : title;
+                h2Results.push({ text: fullContent, imageUrl, targetUrl: selectedUrl });
             }
         }
         if (h2Results.length > 0) {
@@ -157,7 +167,7 @@ function fetchFact(useBackup = false) {
                 return { text: extractedText, imageUrl: null, targetUrl: selectedUrl };
             }
         }
-        // 3. General Fallback
+        // 3. Fallback
         const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
             html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
         if (fallbackTitleMatch && fallbackTitleMatch[1]) {
@@ -166,21 +176,12 @@ function fetchFact(useBackup = false) {
                 return { text, imageUrl: null, targetUrl: selectedUrl };
             }
         }
-        const pMatches = html.match(/<p[^>]*>(.*?)<\/p>/gi);
-        if (pMatches) {
-            for (const p of pMatches) {
-                const cleaned = cleanHtml(p);
-                if (cleaned.length > 20 && !cleaned.includes("Cookie") && !cleaned.includes("Copyright")) {
-                    return { text: cleaned, imageUrl: null, targetUrl: selectedUrl };
-                }
-            }
-        }
         throw new Error(`Failed to parse fact from ${selectedUrl}`);
     });
 }
 /**
  * Checks Google Sheet for fact duplicates and optionally appends a new record.
- * Table structure: Row 1 = Headers, Row 2+ = [Timestamp, English Fact]
+ * Table structure: Row 1 = Headers, Row 2+ = [English Fact, Timestamp]
  */
 function checkAndRecordFact(factText, readOnly) {
     const props = PropertiesService.getScriptProperties();
@@ -194,7 +195,7 @@ function checkAndRecordFact(factText, readOnly) {
     const normalizedTarget = factText.trim().toLowerCase();
     let exists = false;
     for (let i = 1; i < data.length; i++) {
-        const existingFact = data[i][1];
+        const existingFact = data[i][0]; // Column A is English Fact
         if (existingFact && String(existingFact).trim().toLowerCase() === normalizedTarget) {
             exists = true;
             break;
@@ -202,12 +203,12 @@ function checkAndRecordFact(factText, readOnly) {
     }
     if (!readOnly && !exists) {
         const timestamp = new Date().toISOString();
-        sheet.appendRow([timestamp, factText]);
+        sheet.appendRow([factText, timestamp]);
     }
     return exists;
 }
 /**
- * Translates English fact text into Taiwan Traditional Chinese using Gemini API with retry logic.
+ * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
  */
 function translateWithGemini(englishText) {
     return withRetry(() => {
@@ -216,7 +217,7 @@ function translateWithGemini(englishText) {
         if (!apiKey) {
             throw new Error("GEMINI_API_KEY script property is not configured.");
         }
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
         const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋或原文：\n\n${englishText}`;
         const payload = {
             contents: [
@@ -337,9 +338,18 @@ function testPushToMe() {
     const allProps = props.getProperties();
     let token = "";
     for (const key of Object.keys(allProps)) {
-        if (key.startsWith("LINE_CHANNEL_ACCESS_TOKEN")) {
+        if (key.startsWith("LINE_CHANNEL_ACCESS_TOKEN_2")) {
             token = allProps[key];
             break;
+        }
+    }
+    if (!token) {
+        // Fallback to any token if LINE_CHANNEL_ACCESS_TOKEN_2 is missing
+        for (const key of Object.keys(allProps)) {
+            if (key.startsWith("LINE_CHANNEL_ACCESS_TOKEN")) {
+                token = allProps[key];
+                break;
+            }
         }
     }
     if (!token) {
