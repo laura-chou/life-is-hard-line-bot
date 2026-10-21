@@ -1,4 +1,4 @@
-const flexTemplateString = `{
+var flexTemplateString = `{
   "type": "bubble",
   "size": "mega",
   "body": {

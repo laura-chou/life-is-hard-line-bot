@@ -1,5 +1,5 @@
 "use strict";
-const flexTemplateString = `{
+var flexTemplateString = `{
   "type": "bubble",
   "size": "mega",
   "body": {

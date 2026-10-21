@@ -1,3 +1,5 @@
+declare var flexTemplateString: string;
+
 /**
  * Strips HTML tags and unescapes common HTML entities.
  */
