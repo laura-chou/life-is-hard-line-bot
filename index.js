@@ -52,6 +52,15 @@ const flexTemplateString = `{
     ]
   }
 }`;
+const factUrls = [
+    "https://www.thefactsite.com/fact-of-the-day/",
+    "https://www.thefactsite.com/random-facts/",
+    "https://www.thefactsite.com/100-space-facts/",
+    "https://www.thefactsite.com/history-facts/",
+    "https://www.thefactsite.com/animal-facts/",
+    "https://www.thefactsite.com/technology-facts/",
+    "https://www.thefactsite.com/food-facts/"
+];
 /**
  * Strips HTML tags and unescapes common HTML entities.
  */
@@ -72,58 +81,106 @@ function cleanHtml(html) {
     return cleaned.replace(/\s+/g, " ").trim();
 }
 /**
- * Scrapes a fact from The Fact Site.
- * @param useBackup - If false, scrapes the fact of the day / homepage; if true, scrapes random facts.
+ * Helper to execute an operation with auto-retry up to 3 attempts.
  */
-function fetchFact(useBackup) {
-    const url = useBackup
-        ? "https://www.thefactsite.com/random-facts/"
-        : "https://www.thefactsite.com/fact-of-the-day/";
-    const response = UrlFetchApp.fetch(url, {
-        muteHttpExceptions: true,
-        headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        },
+function withRetry(fn, maxAttempts = 3, initialDelayMs = 2000) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return fn();
+        }
+        catch (err) {
+            lastError = err;
+            console.warn(`Attempt ${attempt}/${maxAttempts} failed: ${err?.message || err}`);
+            if (attempt < maxAttempts) {
+                Utilities.sleep(initialDelayMs * attempt);
+            }
+        }
+    }
+    throw lastError;
+}
+/**
+ * Scrapes a fact from a randomly selected Fact Site URL or fallback.
+ * Supports dual structural parsing: <h2 class="list"> and <p class="list">.
+ */
+function fetchFact(useBackup = false) {
+    return withRetry(() => {
+        const selectedUrl = useBackup
+            ? "https://www.thefactsite.com/random-facts/"
+            : factUrls[Math.floor(Math.random() * factUrls.length)];
+        console.log(`[Scraper] Selected Target URL: ${selectedUrl}`);
+        const response = UrlFetchApp.fetch(selectedUrl, {
+            muteHttpExceptions: true,
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            },
+        });
+        const statusCode = response.getResponseCode();
+        if (statusCode !== 200) {
+            throw new Error(`HTTP Error ${statusCode} when fetching ${selectedUrl}`);
+        }
+        const html = response.getContentText();
+        // 1. Structure A: <h2 class="list">...</h2> followed by <p>
+        const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2|<div class="entry-content"|$)/gi;
+        let h2Match;
+        const h2Results = [];
+        while ((h2Match = h2Regex.exec(html)) !== null) {
+            const titleRaw = h2Match[1];
+            const title = cleanHtml(titleRaw);
+            const afterChunk = h2Match[2];
+            const pMatch = afterChunk.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+            let pContent = "";
+            let imageUrl = null;
+            if (pMatch) {
+                pContent = cleanHtml(pMatch[1]);
+                const imgMatch = pMatch[1].match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i) ||
+                    afterChunk.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+                if (imgMatch && imgMatch[1]) {
+                    imageUrl = imgMatch[1];
+                }
+            }
+            if (title.length > 5) {
+                const fullText = pContent ? `${title} — ${pContent}` : title;
+                h2Results.push({ text: fullText, imageUrl, targetUrl: selectedUrl });
+            }
+        }
+        if (h2Results.length > 0) {
+            const picked = h2Results[Math.floor(Math.random() * h2Results.length)];
+            return picked;
+        }
+        // 2. Structure B: <p class="list">...
+        const pListMatches = html.match(/<p\s+class="list"[^>]*>(.*?)<\/p>/gi);
+        if (pListMatches && pListMatches.length > 0) {
+            const randomIndex = Math.floor(Math.random() * Math.min(pListMatches.length, 10));
+            const extractedText = cleanHtml(pListMatches[randomIndex]);
+            if (extractedText.length > 10) {
+                return { text: extractedText, imageUrl: null, targetUrl: selectedUrl };
+            }
+        }
+        // 3. General Fallback
+        const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
+            html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
+        if (fallbackTitleMatch && fallbackTitleMatch[1]) {
+            const text = cleanHtml(fallbackTitleMatch[1]);
+            if (text.length > 10) {
+                return { text, imageUrl: null, targetUrl: selectedUrl };
+            }
+        }
+        const pMatches = html.match(/<p[^>]*>(.*?)<\/p>/gi);
+        if (pMatches) {
+            for (const p of pMatches) {
+                const cleaned = cleanHtml(p);
+                if (cleaned.length > 20 && !cleaned.includes("Cookie") && !cleaned.includes("Copyright")) {
+                    return { text: cleaned, imageUrl: null, targetUrl: selectedUrl };
+                }
+            }
+        }
+        throw new Error(`Failed to parse fact from ${selectedUrl}`);
     });
-    const html = response.getContentText();
-    if (useBackup) {
-        const matches = html.match(/<p class="list"[^>]*>(.*?)<\/p>/g) || html.match(/<p>(.*?)<\/p>/g);
-        if (matches && matches.length > 0) {
-            const randomIndex = Math.floor(Math.random() * Math.min(matches.length, 10));
-            const extracted = cleanHtml(matches[randomIndex]);
-            if (extracted.length > 10) {
-                return extracted;
-            }
-        }
-    }
-    else {
-        const match = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
-            html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i) ||
-            html.match(/<p class="fact-text"[^>]*>(.*?)<\/p>/i);
-        if (match && match[1]) {
-            const extracted = cleanHtml(match[1]);
-            if (extracted.length > 10) {
-                return extracted;
-            }
-        }
-    }
-    const pMatches = html.match(/<p[^>]*>(.*?)<\/p>/gi);
-    if (pMatches) {
-        for (const p of pMatches) {
-            const cleaned = cleanHtml(p);
-            if (cleaned.length > 20 && !cleaned.includes("Cookie") && !cleaned.includes("Copyright")) {
-                return cleaned;
-            }
-        }
-    }
-    throw new Error(`Failed to fetch fact (useBackup: ${useBackup})`);
 }
 /**
  * Checks Google Sheet for fact duplicates and optionally appends a new record.
  * Table structure: Row 1 = Headers, Row 2+ = [Timestamp, English Fact]
- * @param factText - The English fact text to check/record.
- * @param readOnly - If true, only checks for duplicates without writing; if false, records if not existing.
- * @returns true if the fact already exists in spreadsheet; false if it's new.
  */
 function checkAndRecordFact(factText, readOnly) {
     const props = PropertiesService.getScriptProperties();
@@ -136,9 +193,8 @@ function checkAndRecordFact(factText, readOnly) {
     const data = sheet.getDataRange().getValues();
     const normalizedTarget = factText.trim().toLowerCase();
     let exists = false;
-    // Start from index 1 (Row 2 in sheet) to skip the header row
     for (let i = 1; i < data.length; i++) {
-        const existingFact = data[i][1]; // Column B is English Fact
+        const existingFact = data[i][1];
         if (existingFact && String(existingFact).trim().toLowerCase() === normalizedTarget) {
             exists = true;
             break;
@@ -151,74 +207,89 @@ function checkAndRecordFact(factText, readOnly) {
     return exists;
 }
 /**
- * Translates English fact text into Taiwan Traditional Chinese using Gemini API.
- * @param englishText - The English fact text.
+ * Translates English fact text into Taiwan Traditional Chinese using Gemini API with retry logic.
  */
 function translateWithGemini(englishText) {
-    const props = PropertiesService.getScriptProperties();
-    const apiKey = props.getProperty("GEMINI_API_KEY");
-    if (!apiKey) {
-        throw new Error("GEMINI_API_KEY script property is not configured.");
-    }
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-    const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋或原文：\n\n${englishText}`;
-    const payload = {
-        contents: [
-            {
-                parts: [
-                    {
-                        text: prompt,
-                    },
-                ],
-            },
-        ],
-    };
-    const response = UrlFetchApp.fetch(url, {
-        method: "post",
-        contentType: "application/json",
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true,
+    return withRetry(() => {
+        const props = PropertiesService.getScriptProperties();
+        const apiKey = props.getProperty("GEMINI_API_KEY");
+        if (!apiKey) {
+            throw new Error("GEMINI_API_KEY script property is not configured.");
+        }
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+        const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋或原文：\n\n${englishText}`;
+        const payload = {
+            contents: [
+                {
+                    parts: [
+                        {
+                            text: prompt,
+                        },
+                    ],
+                },
+            ],
+        };
+        const response = UrlFetchApp.fetch(url, {
+            method: "post",
+            contentType: "application/json",
+            payload: JSON.stringify(payload),
+            muteHttpExceptions: true,
+        });
+        const statusCode = response.getResponseCode();
+        if (statusCode !== 200) {
+            throw new Error(`Gemini API Error (${statusCode}): ${response.getContentText()}`);
+        }
+        const result = JSON.parse(response.getContentText());
+        const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!chineseText) {
+            throw new Error("Failed to parse response from Gemini API.");
+        }
+        return chineseText.trim();
     });
-    const statusCode = response.getResponseCode();
-    if (statusCode !== 200) {
-        throw new Error(`Gemini API Error (${statusCode}): ${response.getContentText()}`);
-    }
-    const result = JSON.parse(response.getContentText());
-    const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!chineseText) {
-        throw new Error("Failed to parse response from Gemini API.");
-    }
-    return chineseText.trim();
 }
 /**
- * Helper to construct the LINE Flex Message payload.
+ * Helper to construct the LINE Flex Message payload with dynamic Hero Image support.
  */
-function buildFlexMessagePayload(chineseText, englishText) {
-    const jsonStr = flexTemplateString
+function buildFlexMessagePayload(chineseText, englishText, imageUrl) {
+    const flexObj = JSON.parse(flexTemplateString
         .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
-        .replace("{{ENGLISH_TEXT}}", englishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
+        .replace("{{ENGLISH_TEXT}}", englishText.replace(/"/g, '\\"').replace(/\n/g, "\\n")));
+    if (imageUrl && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
+        flexObj.hero = {
+            type: "image",
+            url: imageUrl,
+            size: "full",
+            aspectMode: "cover",
+            aspectRatio: "20:13"
+        };
+    }
     return {
         type: "flex",
         altText: "本日冷知識",
-        contents: JSON.parse(jsonStr),
+        contents: flexObj,
     };
 }
 /**
  * Production automated function to fetch daily fact, translate, broadcast to all configured LINE Bots, and record to sheet.
  */
 function fetchTranslateAndBroadcast() {
-    let fact = fetchFact(false);
-    let isDuplicate = checkAndRecordFact(fact, true);
+    let factData = fetchFact(false);
+    let isDuplicate = checkAndRecordFact(factData.text, true);
     if (isDuplicate) {
-        console.log("Primary fact is duplicate. Fetching backup fact...");
-        fact = fetchFact(true);
-        isDuplicate = checkAndRecordFact(fact, true);
+        console.log("[Duplicate] Primary fact is duplicate. Fetching backup fact...");
+        factData = fetchFact(true);
+        isDuplicate = checkAndRecordFact(factData.text, true);
         if (isDuplicate) {
-            console.warn("Backup fact is also duplicate. Proceeding with current fact.");
+            console.warn("[Duplicate] Backup fact is also duplicate. Proceeding with current fact.");
         }
     }
-    const chineseFact = translateWithGemini(fact);
-    const flexMessage = buildFlexMessagePayload(chineseFact, fact);
+    const chineseFact = translateWithGemini(factData.text);
+    console.log("=== Execution Console Log ===");
+    console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
+    console.log(`Original English Fact: ${factData.text}`);
+    console.log(`Image URL: ${factData.imageUrl || "None"}`);
+    console.log(`Gemini Chinese Translation: ${chineseFact}`);
+    const flexMessage = buildFlexMessagePayload(chineseFact, factData.text, factData.imageUrl);
     const props = PropertiesService.getScriptProperties().getProperties();
     const tokens = [];
     for (const key of Object.keys(props)) {
@@ -233,21 +304,26 @@ function fetchTranslateAndBroadcast() {
         throw new Error("No LINE_CHANNEL_ACCESS_TOKEN found in ScriptProperties.");
     }
     for (const token of tokens) {
-        const broadcastUrl = "https://api.line.me/v2/bot/message/broadcast";
-        const response = UrlFetchApp.fetch(broadcastUrl, {
-            method: "post",
-            headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${token}`,
-            },
-            payload: JSON.stringify({
-                messages: [flexMessage],
-            }),
-            muteHttpExceptions: true,
+        withRetry(() => {
+            const broadcastUrl = "https://api.line.me/v2/bot/message/broadcast";
+            const response = UrlFetchApp.fetch(broadcastUrl, {
+                method: "post",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                payload: JSON.stringify({
+                    messages: [flexMessage],
+                }),
+                muteHttpExceptions: true,
+            });
+            console.log(`[LINE Broadcast API] Status Code: ${response.getResponseCode()}, Body: ${response.getContentText()}`);
+            if (response.getResponseCode() !== 200) {
+                throw new Error(`LINE Broadcast API failed with status ${response.getResponseCode()}: ${response.getContentText()}`);
+            }
         });
-        console.log(`Broadcast response status: ${response.getResponseCode()}, body: ${response.getContentText()}`);
     }
-    checkAndRecordFact(fact, false);
+    checkAndRecordFact(factData.text, false);
 }
 /**
  * Developer test function to push flex message to MY_LINE_USER_ID for layout confirmation.
@@ -269,23 +345,33 @@ function testPushToMe() {
     if (!token) {
         throw new Error("No LINE_CHANNEL_ACCESS_TOKEN found in ScriptProperties.");
     }
-    const fact = fetchFact(false);
-    const chineseFact = translateWithGemini(fact);
-    const flexMessage = buildFlexMessagePayload(chineseFact, fact);
-    const pushUrl = "https://api.line.me/v2/bot/message/push";
-    const response = UrlFetchApp.fetch(pushUrl, {
-        method: "post",
-        headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-        },
-        payload: JSON.stringify({
-            to: userId,
-            messages: [flexMessage],
-        }),
-        muteHttpExceptions: true,
+    const factData = fetchFact(false);
+    const chineseFact = translateWithGemini(factData.text);
+    console.log("=== Test Push Console Log ===");
+    console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
+    console.log(`Original English Fact: ${factData.text}`);
+    console.log(`Image URL: ${factData.imageUrl || "None"}`);
+    console.log(`Gemini Chinese Translation: ${chineseFact}`);
+    const flexMessage = buildFlexMessagePayload(chineseFact, factData.text, factData.imageUrl);
+    withRetry(() => {
+        const pushUrl = "https://api.line.me/v2/bot/message/push";
+        const response = UrlFetchApp.fetch(pushUrl, {
+            method: "post",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+            },
+            payload: JSON.stringify({
+                to: userId,
+                messages: [flexMessage],
+            }),
+            muteHttpExceptions: true,
+        });
+        console.log(`[LINE Push API] Status Code: ${response.getResponseCode()}, Body: ${response.getContentText()}`);
+        if (response.getResponseCode() !== 200) {
+            throw new Error(`LINE Push API failed with status ${response.getResponseCode()}: ${response.getContentText()}`);
+        }
     });
-    console.log(`Test Push response status: ${response.getResponseCode()}, body: ${response.getContentText()}`);
 }
 globalThis.fetchTranslateAndBroadcast = fetchTranslateAndBroadcast;
 globalThis.testPushToMe = testPushToMe;
