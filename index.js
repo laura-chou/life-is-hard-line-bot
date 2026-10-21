@@ -103,7 +103,8 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 2000) {
 }
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Collects both <p class="list"> and <h2 class="list"> items into a unified candidate pool before sampling.
+ * Collects both <p class="list"> and <h2 class="list"> items into a unified candidate pool.
+ * Includes instant break protection on <p>&nbsp;</p> or empty paragraphs.
  */
 function fetchFact(useBackup = false) {
     return withRetry(() => {
@@ -142,7 +143,7 @@ function fetchFact(useBackup = false) {
                 });
             }
         }
-        // 2. Collect all <h2 class="list"> block items with strict boundary control
+        // 2. Collect all <h2 class="list"> block items with strict boundary control and paragraph break protection
         const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
         let h2Match;
         while ((h2Match = h2Regex.exec(html)) !== null) {
@@ -156,12 +157,16 @@ function fetchFact(useBackup = false) {
             if (imgMatch && imgMatch[1]) {
                 imageUrl = imgMatch[1];
             }
-            // Extract all valid text paragraphs strictly within this block
+            // Extract all valid text paragraphs strictly within this block, breaking instantly on &nbsp; or empty <p>
             const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
             let pMatch;
             while ((pMatch = pRegex.exec(chunkBody)) !== null) {
                 const rawP = pMatch[1];
                 const cleanedP = cleanHtml(rawP);
+                // Instant break protection: if paragraph contains &nbsp; or is empty, stop collecting further paragraphs
+                if (rawP.includes("&nbsp;") || cleanedP.length === 0) {
+                    break;
+                }
                 if (cleanedP.length > 5 && !cleanedP.includes("Cookie") && !cleanedP.includes("Copyright")) {
                     paragraphs.push(cleanedP);
                 }
