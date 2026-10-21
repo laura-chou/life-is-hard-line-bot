@@ -1,4 +1,4 @@
-"use strict";
+import { flexTemplateString } from "./template.js";
 /**
  * Strips HTML tags and unescapes common HTML entities.
  */
@@ -22,7 +22,7 @@ function cleanHtml(html) {
  * Scrapes a fact from The Fact Site.
  * @param useBackup - If false, scrapes the fact of the day / homepage; if true, scrapes random facts.
  */
-function fetchFact(useBackup) {
+export function fetchFact(useBackup) {
     const url = useBackup
         ? "https://www.thefactsite.com/random-facts/"
         : "https://www.thefactsite.com/fact-of-the-day/";
@@ -67,12 +67,12 @@ function fetchFact(useBackup) {
 }
 /**
  * Checks Google Sheet for fact duplicates and optionally appends a new record.
- * Table structure: [Timestamp, English Fact]
+ * Table structure: Row 1 = Headers, Row 2+ = [Timestamp, English Fact]
  * @param factText - The English fact text to check/record.
  * @param readOnly - If true, only checks for duplicates without writing; if false, records if not existing.
  * @returns true if the fact already exists in spreadsheet; false if it's new.
  */
-function checkAndRecordFact(factText, readOnly) {
+export function checkAndRecordFact(factText, readOnly) {
     const props = PropertiesService.getScriptProperties();
     const spreadsheetId = props.getProperty("SPREADSHEET_ID");
     if (!spreadsheetId) {
@@ -83,7 +83,8 @@ function checkAndRecordFact(factText, readOnly) {
     const data = sheet.getDataRange().getValues();
     const normalizedTarget = factText.trim().toLowerCase();
     let exists = false;
-    for (let i = 0; i < data.length; i++) {
+    // Start from index 1 (Row 2 in sheet) to skip the header row
+    for (let i = 1; i < data.length; i++) {
         const existingFact = data[i][1]; // Column B is English Fact
         if (existingFact && String(existingFact).trim().toLowerCase() === normalizedTarget) {
             exists = true;
@@ -100,7 +101,7 @@ function checkAndRecordFact(factText, readOnly) {
  * Translates English fact text into Taiwan Traditional Chinese using Gemini API.
  * @param englishText - The English fact text.
  */
-function translateWithGemini(englishText) {
+export function translateWithGemini(englishText) {
     const props = PropertiesService.getScriptProperties();
     const apiKey = props.getProperty("GEMINI_API_KEY");
     if (!apiKey) {
@@ -152,7 +153,7 @@ function buildFlexMessagePayload(chineseText, englishText) {
 /**
  * Production automated function to fetch daily fact, translate, broadcast to all configured LINE Bots, and record to sheet.
  */
-function fetchTranslateAndBroadcast() {
+export function fetchTranslateAndBroadcast() {
     let fact = fetchFact(false);
     let isDuplicate = checkAndRecordFact(fact, true);
     if (isDuplicate) {
@@ -198,7 +199,7 @@ function fetchTranslateAndBroadcast() {
 /**
  * Developer test function to push flex message to MY_LINE_USER_ID for layout confirmation.
  */
-function testPushToMe() {
+export function testPushToMe() {
     const props = PropertiesService.getScriptProperties();
     const userId = props.getProperty("MY_LINE_USER_ID");
     if (!userId) {
@@ -233,3 +234,8 @@ function testPushToMe() {
     });
     console.log(`Test Push response status: ${response.getResponseCode()}, body: ${response.getContentText()}`);
 }
+globalThis.fetchTranslateAndBroadcast = fetchTranslateAndBroadcast;
+globalThis.testPushToMe = testPushToMe;
+globalThis.fetchFact = fetchFact;
+globalThis.checkAndRecordFact = checkAndRecordFact;
+globalThis.translateWithGemini = translateWithGemini;

@@ -1,5 +1,4 @@
-"use strict";
-var flexTemplateString = `{
+export const flexTemplateString = `{
   "type": "bubble",
   "size": "mega",
   "body": {
