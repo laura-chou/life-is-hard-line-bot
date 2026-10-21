@@ -101,7 +101,7 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 2000) {
 }
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Uses refined regex boundaries and multi-paragraph accumulation.
+ * Uses strict boundary isolation to ensure <h2 class="list"> blocks never overflow into subsequent facts.
  */
 function fetchFact(useBackup = false) {
     return withRetry(() => {
@@ -120,33 +120,29 @@ function fetchFact(useBackup = false) {
             throw new Error(`HTTP Error ${statusCode} when fetching ${selectedUrl}`);
         }
         const html = response.getContentText();
-        // 1. Precise boundary Regex for <h2 class="list"> blocks
-        const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|<p>\s*(?:&nbsp;|\s)*<\/p>|<div class="entry-content"|$)/gi;
+        // 1. Strict boundary Regex: strictly bounded from <h2 class="list"> until the next <h2 class="list"> or end of string ($)
+        const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
         let h2Match;
         const h2Results = [];
         while ((h2Match = h2Regex.exec(html)) !== null) {
             const titleRaw = h2Match[1];
             const title = cleanHtml(titleRaw);
-            const afterChunk = h2Match[2];
+            const chunkBody = h2Match[2];
             let imageUrl = null;
             const paragraphs = [];
+            // Extract image URL strictly within this block
+            const imgMatch = chunkBody.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+            if (imgMatch && imgMatch[1]) {
+                imageUrl = imgMatch[1];
+            }
+            // Extract all valid text paragraphs strictly within this block
             const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
             let pMatch;
-            while ((pMatch = pRegex.exec(afterChunk)) !== null) {
+            while ((pMatch = pRegex.exec(chunkBody)) !== null) {
                 const rawP = pMatch[1];
-                const imgMatch = rawP.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
-                if (imgMatch && imgMatch[1] && !imageUrl) {
-                    imageUrl = imgMatch[1];
-                }
                 const cleanedP = cleanHtml(rawP);
                 if (cleanedP.length > 5 && !cleanedP.includes("Cookie") && !cleanedP.includes("Copyright")) {
                     paragraphs.push(cleanedP);
-                }
-            }
-            if (!imageUrl) {
-                const imgMatch = afterChunk.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
-                if (imgMatch && imgMatch[1]) {
-                    imageUrl = imgMatch[1];
                 }
             }
             if (title.length > 3) {
@@ -344,7 +340,6 @@ function testPushToMe() {
         }
     }
     if (!token) {
-        // Fallback to any token if LINE_CHANNEL_ACCESS_TOKEN_2 is missing
         for (const key of Object.keys(allProps)) {
             if (key.startsWith("LINE_CHANNEL_ACCESS_TOKEN")) {
                 token = allProps[key];
