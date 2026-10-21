@@ -45,22 +45,26 @@ const flexTemplateString = `{
         "wrap": true,
         "size": "sm",
         "color": "#4A4A4A",
-        "margin": "md",
-        "lineSpacing": "xs"
+        "margin": "lg",
+        "lineSpacing": "10px"
       }
     ]
   }
 }`;
 
-const factUrls: string[] = [
-  "https://www.thefactsite.com/1000-interesting-facts/",
-  "https://www.thefactsite.com/top-100-random-funny-facts/",
-  "https://www.thefactsite.com/100-space-facts/",
-  "https://www.thefactsite.com/100-halloween-facts/",
-  "https://www.thefactsite.com/100-random-food-facts/",
-  "https://www.thefactsite.com/facts-everyone-should-know/",
-  "https://www.thefactsite.com/dinosaur-facts/"
+const BASE_DOMAIN = "https://www.thefactsite.com";
+
+const factPaths: string[] = [
+  "/1000-interesting-facts/",
+  "/top-100-random-funny-facts/",
+  "/100-space-facts/",
+  "/100-halloween-facts/",
+  "/100-random-food-facts/",
+  "/facts-everyone-should-know/",
+  "/dinosaur-facts/"
 ];
+
+const factUrls: string[] = factPaths.map(path => `${BASE_DOMAIN}${path}`);
 
 interface FactResult {
   text: string;
@@ -109,12 +113,12 @@ function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: numb
 
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Supports both Representation 1 (<h2 class="list">) and Representation 2 (<p class="list">).
+ * Collects both <p class="list"> and <h2 class="list"> items into a unified candidate pool before sampling.
  */
 function fetchFact(useBackup: boolean = false): FactResult {
   return withRetry(() => {
     const selectedUrl = useBackup
-      ? "https://www.thefactsite.com/1000-interesting-facts/"
+      ? `${BASE_DOMAIN}/1000-interesting-facts/`
       : factUrls[Math.floor(Math.random() * factUrls.length)];
 
     console.log(`[Scraper] Selected Target URL: ${selectedUrl}`);
@@ -133,11 +137,11 @@ function fetchFact(useBackup: boolean = false): FactResult {
     }
 
     const html = response.getContentText();
+    const allResults: FactResult[] = [];
 
-    // Priority 1: Representation 2 (<p class="list"> short standalone sentences)
+    // 1. Collect all <p class="list"> items
     const pListRegex = /<p\s+class="list"[^>]*>([\s\S]*?)<\/p>/gi;
     let pListMatch: RegExpExecArray | null;
-    const pListResults: FactResult[] = [];
 
     while ((pListMatch = pListRegex.exec(html)) !== null) {
       const rawPContent = pListMatch[1];
@@ -150,7 +154,7 @@ function fetchFact(useBackup: boolean = false): FactResult {
           imageUrl = imgMatch[1];
         }
 
-        pListResults.push({
+        allResults.push({
           text: cleanedText,
           imageUrl: imageUrl,
           targetUrl: selectedUrl,
@@ -158,15 +162,9 @@ function fetchFact(useBackup: boolean = false): FactResult {
       }
     }
 
-    if (pListResults.length > 0) {
-      const picked = pListResults[Math.floor(Math.random() * pListResults.length)];
-      return picked;
-    }
-
-    // Priority 2: Representation 1 (<h2 class="list"> titled section blocks)
+    // 2. Collect all <h2 class="list"> block items with strict boundary control
     const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
     let h2Match: RegExpExecArray | null;
-    const h2Results: FactResult[] = [];
 
     while ((h2Match = h2Regex.exec(html)) !== null) {
       const titleRaw = h2Match[1];
@@ -195,17 +193,18 @@ function fetchFact(useBackup: boolean = false): FactResult {
       }
 
       if (title.length > 3) {
-        const fullContent = paragraphs.length > 0 ? `${title} — ${paragraphs.join("\n\n")}` : title;
-        h2Results.push({ text: fullContent, imageUrl, targetUrl: selectedUrl });
+        const fullContent = paragraphs.length > 0 ? `${title}\n\n${paragraphs.join("\n\n")}` : title;
+        allResults.push({ text: fullContent, imageUrl, targetUrl: selectedUrl });
       }
     }
 
-    if (h2Results.length > 0) {
-      const picked = h2Results[Math.floor(Math.random() * h2Results.length)];
+    // 3. Randomly select from unified candidate pool
+    if (allResults.length > 0) {
+      const picked = allResults[Math.floor(Math.random() * allResults.length)];
       return picked;
     }
 
-    // Priority 3: Fallback title/paragraph parsing
+    // 4. Fallback title parsing if candidate pool is empty
     const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
                                html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
     if (fallbackTitleMatch && fallbackTitleMatch[1]) {
@@ -215,7 +214,7 @@ function fetchFact(useBackup: boolean = false): FactResult {
       }
     }
 
-    throw new Error(`Failed to parse fact from ${selectedUrl}`);
+    throw new Error(`Failed to parse fact candidate pool from ${selectedUrl}`);
   });
 }
 
