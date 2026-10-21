@@ -101,7 +101,7 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 2000) {
 }
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Uses strict boundary isolation to ensure <h2 class="list"> blocks never overflow into subsequent facts.
+ * Supports both Representation 1 (<h2 class="list">) and Representation 2 (<p class="list">).
  */
 function fetchFact(useBackup = false) {
     return withRetry(() => {
@@ -120,7 +120,31 @@ function fetchFact(useBackup = false) {
             throw new Error(`HTTP Error ${statusCode} when fetching ${selectedUrl}`);
         }
         const html = response.getContentText();
-        // 1. Strict boundary Regex: strictly bounded from <h2 class="list"> until the next <h2 class="list"> or end of string ($)
+        // Priority 1: Representation 2 (<p class="list"> short standalone sentences)
+        const pListRegex = /<p\s+class="list"[^>]*>([\s\S]*?)<\/p>/gi;
+        let pListMatch;
+        const pListResults = [];
+        while ((pListMatch = pListRegex.exec(html)) !== null) {
+            const rawPContent = pListMatch[1];
+            const cleanedText = cleanHtml(rawPContent);
+            if (cleanedText.length > 10) {
+                let imageUrl = null;
+                const imgMatch = rawPContent.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+                if (imgMatch && imgMatch[1]) {
+                    imageUrl = imgMatch[1];
+                }
+                pListResults.push({
+                    text: cleanedText,
+                    imageUrl: imageUrl,
+                    targetUrl: selectedUrl,
+                });
+            }
+        }
+        if (pListResults.length > 0) {
+            const picked = pListResults[Math.floor(Math.random() * pListResults.length)];
+            return picked;
+        }
+        // Priority 2: Representation 1 (<h2 class="list"> titled section blocks)
         const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
         let h2Match;
         const h2Results = [];
@@ -154,16 +178,7 @@ function fetchFact(useBackup = false) {
             const picked = h2Results[Math.floor(Math.random() * h2Results.length)];
             return picked;
         }
-        // 2. Structure B: <p class="list">...
-        const pListMatches = html.match(/<p\s+class="list"[^>]*>(.*?)<\/p>/gi);
-        if (pListMatches && pListMatches.length > 0) {
-            const randomIndex = Math.floor(Math.random() * Math.min(pListMatches.length, 10));
-            const extractedText = cleanHtml(pListMatches[randomIndex]);
-            if (extractedText.length > 10) {
-                return { text: extractedText, imageUrl: null, targetUrl: selectedUrl };
-            }
-        }
-        // 3. Fallback
+        // Priority 3: Fallback title/paragraph parsing
         const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
             html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
         if (fallbackTitleMatch && fallbackTitleMatch[1]) {
