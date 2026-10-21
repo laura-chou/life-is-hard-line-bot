@@ -1,4 +1,57 @@
-import { flexTemplateString } from "./template.js";
+"use strict";
+const flexTemplateString = `{
+  "type": "bubble",
+  "size": "mega",
+  "body": {
+    "type": "box",
+    "layout": "vertical",
+    "backgroundColor": "#FFFFFF",
+    "cornerRadius": "xl",
+    "paddingAll": "xxl",
+    "action": {
+      "type": "uri",
+      "label": "action",
+      "uri": "https://www.thefactsite.com"
+    },
+    "contents": [
+      {
+        "type": "text",
+        "text": "本日冷知識",
+        "weight": "bold",
+        "size": "xl",
+        "align": "center",
+        "color": "#1C1B1F"
+      },
+      {
+        "type": "text",
+        "text": "THE FACT SITE",
+        "weight": "bold",
+        "size": "sm",
+        "align": "center",
+        "color": "#0056C6",
+        "margin": "xs"
+      },
+      {
+        "type": "text",
+        "text": "{{CHINESE_TEXT}}",
+        "wrap": true,
+        "size": "md",
+        "color": "#1C1B1F",
+        "margin": "lg",
+        "lineSpacing": "md"
+      },
+      {
+        "type": "text",
+        "text": "{{ENGLISH_TEXT}}",
+        "wrap": true,
+        "size": "sm",
+        "color": "#4A4A4A",
+        "margin": "md",
+        "lineSpacing": "xs"
+      }
+    ]
+  }
+}`;
 /**
  * Strips HTML tags and unescapes common HTML entities.
  */
@@ -22,7 +75,7 @@ function cleanHtml(html) {
  * Scrapes a fact from The Fact Site.
  * @param useBackup - If false, scrapes the fact of the day / homepage; if true, scrapes random facts.
  */
-export function fetchFact(useBackup) {
+function fetchFact(useBackup) {
     const url = useBackup
         ? "https://www.thefactsite.com/random-facts/"
         : "https://www.thefactsite.com/fact-of-the-day/";
@@ -72,7 +125,7 @@ export function fetchFact(useBackup) {
  * @param readOnly - If true, only checks for duplicates without writing; if false, records if not existing.
  * @returns true if the fact already exists in spreadsheet; false if it's new.
  */
-export function checkAndRecordFact(factText, readOnly) {
+function checkAndRecordFact(factText, readOnly) {
     const props = PropertiesService.getScriptProperties();
     const spreadsheetId = props.getProperty("SPREADSHEET_ID");
     if (!spreadsheetId) {
@@ -101,7 +154,7 @@ export function checkAndRecordFact(factText, readOnly) {
  * Translates English fact text into Taiwan Traditional Chinese using Gemini API.
  * @param englishText - The English fact text.
  */
-export function translateWithGemini(englishText) {
+function translateWithGemini(englishText) {
     const props = PropertiesService.getScriptProperties();
     const apiKey = props.getProperty("GEMINI_API_KEY");
     if (!apiKey) {
@@ -153,7 +206,7 @@ function buildFlexMessagePayload(chineseText, englishText) {
 /**
  * Production automated function to fetch daily fact, translate, broadcast to all configured LINE Bots, and record to sheet.
  */
-export function fetchTranslateAndBroadcast() {
+function fetchTranslateAndBroadcast() {
     let fact = fetchFact(false);
     let isDuplicate = checkAndRecordFact(fact, true);
     if (isDuplicate) {
@@ -199,7 +252,7 @@ export function fetchTranslateAndBroadcast() {
 /**
  * Developer test function to push flex message to MY_LINE_USER_ID for layout confirmation.
  */
-export function testPushToMe() {
+function testPushToMe() {
     const props = PropertiesService.getScriptProperties();
     const userId = props.getProperty("MY_LINE_USER_ID");
     if (!userId) {

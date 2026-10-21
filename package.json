@@ -2,14 +2,13 @@
   "name": "life_is_hard_line_bot",
   "version": "1.0.0",
   "description": "LINE Bot that fetches daily facts, translates them via Gemini API, broadcasts Flex Messages, and logs history in Google Sheets.",
-  "type": "module",
   "main": "index.js",
   "scripts": {
     "build": "tsc",
     "push": "npm run build && clasp push"
   },
   "devDependencies": {
-    "@types/google-apps-script": "^2.0.13",
-    "typescript": "^7.0.2"
+    "@types/google-apps-script": "^1.0.83",
+    "typescript": "^5.8.2"
   }
 }
