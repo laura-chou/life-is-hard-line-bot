@@ -16,20 +16,12 @@ const flexTemplateString = `{
     "contents": [
       {
         "type": "text",
-        "text": "本日冷知識",
+        "text": "{{TITLE}}",
         "weight": "bold",
         "size": "xl",
         "align": "center",
-        "color": "#1C1B1F"
-      },
-      {
-        "type": "text",
-        "text": "THE FACT SITE",
-        "weight": "bold",
-        "size": "xs",
-        "align": "center",
-        "color": "#0056C6",
-        "margin": "xs"
+        "color": "#1C1B1F",
+        "wrap": true
       },
       {
         "type": "text",
@@ -90,8 +82,9 @@ function cleanHtml(html) {
 }
 /**
  * Helper to execute an operation with auto-retry up to 3 attempts.
+ * Default initial delay updated to 10000ms (10 seconds) for server rate limit stability.
  */
-function withRetry(fn, maxAttempts = 3, initialDelayMs = 5000) {
+function withRetry(fn, maxAttempts = 3, initialDelayMs = 10000) {
     let lastError;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
@@ -109,8 +102,10 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 5000) {
 }
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Collects both <p class="list"> and <h2 class="list"> items into a unified candidate pool.
- * Smart footer paragraph break logic prevents picking up trailing noise.
+ * Supports 3 representations:
+ * 1) <h2 class="list"> with <img> in first <p> and follow-up body <p>
+ * 2) <h2 class="list"> ending with <p>&nbsp;</p> or empty <p> (triggers immediate break)
+ * 3) Standalone <p class="list"> short text items (title defaults to "本日冷知識", no image/no title)
  */
 function fetchFact(useBackup = false) {
     return withRetry(() => {
@@ -130,7 +125,7 @@ function fetchFact(useBackup = false) {
         }
         const html = response.getContentText();
         const allResults = [];
-        // 1. Collect all <p class="list"> items (Representation 2)
+        // Representation 3: Standalone <p class="list"> short text items (no title, no image)
         const pListRegex = /<p\s+class="list"[^>]*>([\s\S]*?)<\/p>/gi;
         let pListMatch;
         while ((pListMatch = pListRegex.exec(html)) !== null) {
@@ -143,7 +138,7 @@ function fetchFact(useBackup = false) {
                     imageUrl = imgMatch[1];
                 }
                 allResults.push({
-                    title: "",
+                    title: "本日冷知識",
                     body: cleanedText,
                     text: cleanedText,
                     imageUrl: imageUrl,
@@ -151,7 +146,7 @@ function fetchFact(useBackup = false) {
                 });
             }
         }
-        // 2. Collect all <h2 class="list"> block items with strict boundary control and smart paragraph break logic
+        // Representations 1 & 2: <h2 class="list"> blocks with image extraction & paragraph break protection
         const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
         let h2Match;
         while ((h2Match = h2Regex.exec(html)) !== null) {
@@ -160,18 +155,18 @@ function fetchFact(useBackup = false) {
             const chunkBody = h2Match[2];
             let imageUrl = null;
             const paragraphs = [];
-            // Extract image URL strictly within this block
+            // Extract image URL strictly within this block chunk
             const imgMatch = chunkBody.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
             if (imgMatch && imgMatch[1]) {
                 imageUrl = imgMatch[1];
             }
-            // Extract all valid text paragraphs strictly within this block, breaking instantly on &nbsp; or empty <p>
+            // Extract all valid text paragraphs strictly within this block
             const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
             let pMatch;
             while ((pMatch = pRegex.exec(chunkBody)) !== null) {
                 const rawP = pMatch[1];
                 const cleanedP = cleanHtml(rawP);
-                // Smart footer break: stop collecting paragraphs if encountering empty or &nbsp; paragraph
+                // Immediate break protection: if paragraph contains &nbsp; or is empty, halt paragraph collection for this block
                 if (rawP.includes("&nbsp;") || cleanedP.length === 0) {
                     break;
                 }
@@ -191,18 +186,18 @@ function fetchFact(useBackup = false) {
                 });
             }
         }
-        // 3. Randomly select from unified candidate pool
+        // Pick a random fact from unified candidate pool
         if (allResults.length > 0) {
             const picked = allResults[Math.floor(Math.random() * allResults.length)];
             return picked;
         }
-        // 4. Fallback title parsing if candidate pool is empty
+        // Fallback title parsing if candidate pool is empty
         const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
             html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
         if (fallbackTitleMatch && fallbackTitleMatch[1]) {
             const title = cleanHtml(fallbackTitleMatch[1]);
             if (title.length > 10) {
-                return { title, body: "", text: title, imageUrl: null, targetUrl: selectedUrl };
+                return { title: "本日冷知識", body: title, text: title, imageUrl: null, targetUrl: selectedUrl };
             }
         }
         throw new Error(`Failed to parse fact candidate pool from ${selectedUrl}`);
@@ -237,9 +232,9 @@ function checkAndRecordFact(factText, readOnly) {
     return exists;
 }
 /**
- * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
+ * Translates English fact text into Taiwan Traditional Chinese JSON (title and text) using Gemini API (gemini-3.8-flash) with retry logic.
  */
-function translateWithGemini(englishText) {
+function translateWithGemini(fact) {
     return withRetry(() => {
         const props = PropertiesService.getScriptProperties();
         const apiKey = props.getProperty("GEMINI_API_KEY");
@@ -247,7 +242,15 @@ function translateWithGemini(englishText) {
             throw new Error("GEMINI_API_KEY script property is not configured.");
         }
         const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-        const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋或原文：\n\n${englishText}`;
+        const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。
+請以嚴格 JSON 格式輸出，結構如下：
+{
+  "title": "繁體中文動態標題",
+  "text": "繁體中文詳細內文"
+}
+
+英文冷知識標題：${fact.title || "本日冷知識"}
+英文冷知識內文：${fact.body || fact.text}`;
         const payload = {
             contents: [
                 {
@@ -270,23 +273,40 @@ function translateWithGemini(englishText) {
             throw new Error(`Gemini API Error (${statusCode}): ${response.getContentText()}`);
         }
         const result = JSON.parse(response.getContentText());
-        const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!chineseText) {
+        const rawContent = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!rawContent) {
             throw new Error("Failed to parse response from Gemini API.");
         }
-        return chineseText.trim();
+        try {
+            const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]);
+                return {
+                    title: parsed.title || fact.title || "本日冷知識",
+                    text: parsed.text || rawContent.trim(),
+                };
+            }
+        }
+        catch (e) {
+            console.warn("Failed to parse JSON from Gemini response, fallback to text format.", e);
+        }
+        return {
+            title: fact.title && fact.title !== "本日冷知識" ? fact.title : "本日冷知識",
+            text: rawContent.trim(),
+        };
     });
 }
 /**
- * Helper to construct the LINE Flex Message payload with dynamic Hero Image support.
+ * Helper to construct the LINE Flex Message payload with dynamic title and Hero Image support.
  * Ensures the complete English text (title + body) is passed to {{ENGLISH_TEXT}}.
  */
-function buildFlexMessagePayload(chineseText, factData, imageUrl) {
+function buildFlexMessagePayload(chineseResult, factData, imageUrl) {
     const fullEnglishText = factData.body
         ? (factData.title ? `${factData.title}\n\n${factData.body}` : factData.body)
         : factData.text;
     const jsonStr = flexTemplateString
-        .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
+        .replace("{{TITLE}}", chineseResult.title.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
+        .replace("{{CHINESE_TEXT}}", chineseResult.text.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
         .replace("{{ENGLISH_TEXT}}", fullEnglishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
     const flexObj = JSON.parse(jsonStr);
     if (imageUrl && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
@@ -302,7 +322,7 @@ function buildFlexMessagePayload(chineseText, factData, imageUrl) {
     }
     return {
         type: "flex",
-        altText: "本日冷知識",
+        altText: chineseResult.title || "本日冷知識",
         contents: flexObj,
     };
 }
@@ -320,13 +340,14 @@ function fetchTranslateAndBroadcast() {
             console.warn("[Duplicate] Backup fact is also duplicate. Proceeding with current fact.");
         }
     }
-    const chineseText = translateWithGemini(factData.text);
+    const chineseResult = translateWithGemini(factData);
     console.log("=== Execution Console Log ===");
     console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
+    console.log(`Dynamic Title: ${chineseResult.title}`);
     console.log(`Original English Fact: ${factData.text}`);
     console.log(`Image URL: ${factData.imageUrl || "None"}`);
-    console.log(`Gemini Chinese Translation: ${chineseText}`);
-    const flexMessage = buildFlexMessagePayload(chineseText, factData, factData.imageUrl);
+    console.log(`Gemini Chinese Translation: ${chineseResult.text}`);
+    const flexMessage = buildFlexMessagePayload(chineseResult, factData, factData.imageUrl);
     const props = PropertiesService.getScriptProperties().getProperties();
     const tokens = [];
     for (const key of Object.keys(props)) {
@@ -391,13 +412,14 @@ function testPushToMe() {
         throw new Error("No LINE_CHANNEL_ACCESS_TOKEN found in ScriptProperties.");
     }
     const factData = fetchFact(false);
-    const chineseText = translateWithGemini(factData.text);
+    const chineseResult = translateWithGemini(factData);
     console.log("=== Test Push Console Log ===");
     console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
+    console.log(`Dynamic Title: ${chineseResult.title}`);
     console.log(`Original English Fact: ${factData.text}`);
     console.log(`Image URL: ${factData.imageUrl || "None"}`);
-    console.log(`Gemini Chinese Translation: ${chineseText}`);
-    const flexMessage = buildFlexMessagePayload(chineseText, factData, factData.imageUrl);
+    console.log(`Gemini Chinese Translation: ${chineseResult.text}`);
+    const flexMessage = buildFlexMessagePayload(chineseResult, factData, factData.imageUrl);
     withRetry(() => {
         const pushUrl = "https://api.line.me/v2/bot/message/push";
         const response = UrlFetchApp.fetch(pushUrl, {

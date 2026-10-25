@@ -15,20 +15,12 @@ const flexTemplateString = `{
     "contents": [
       {
         "type": "text",
-        "text": "本日冷知識",
+        "text": "{{TITLE}}",
         "weight": "bold",
         "size": "xl",
         "align": "center",
-        "color": "#1C1B1F"
-      },
-      {
-        "type": "text",
-        "text": "THE FACT SITE",
-        "weight": "bold",
-        "size": "xs",
-        "align": "center",
-        "color": "#0056C6",
-        "margin": "xs"
+        "color": "#1C1B1F",
+        "wrap": true
       },
       {
         "type": "text",
@@ -80,6 +72,11 @@ interface FactResult {
   targetUrl?: string;
 }
 
+interface TranslationResult {
+  title: string;
+  text: string;
+}
+
 /**
  * Strips HTML tags and unescapes common HTML entities.
  */
@@ -102,8 +99,9 @@ function cleanHtml(html: string): string {
 
 /**
  * Helper to execute an operation with auto-retry up to 3 attempts.
+ * Default initial delay updated to 10000ms (10 seconds) for server rate limit stability.
  */
-function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: number = 5000): T {
+function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: number = 10000): T {
   let lastError: any;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -121,8 +119,10 @@ function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: numb
 
 /**
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Collects both <p class="list"> and <h2 class="list"> items into a unified candidate pool.
- * Smart footer paragraph break logic prevents picking up trailing noise.
+ * Supports 3 representations:
+ * 1) <h2 class="list"> with <img> in first <p> and follow-up body <p>
+ * 2) <h2 class="list"> ending with <p>&nbsp;</p> or empty <p> (triggers immediate break)
+ * 3) Standalone <p class="list"> short text items (title defaults to "本日冷知識", no image/no title)
  */
 function fetchFact(useBackup: boolean = false): FactResult {
   return withRetry(() => {
@@ -148,7 +148,7 @@ function fetchFact(useBackup: boolean = false): FactResult {
     const html = response.getContentText();
     const allResults: FactResult[] = [];
 
-    // 1. Collect all <p class="list"> items (Representation 2)
+    // Representation 3: Standalone <p class="list"> short text items (no title, no image)
     const pListRegex = /<p\s+class="list"[^>]*>([\s\S]*?)<\/p>/gi;
     let pListMatch: RegExpExecArray | null;
 
@@ -164,7 +164,7 @@ function fetchFact(useBackup: boolean = false): FactResult {
         }
 
         allResults.push({
-          title: "",
+          title: "本日冷知識",
           body: cleanedText,
           text: cleanedText,
           imageUrl: imageUrl,
@@ -173,7 +173,7 @@ function fetchFact(useBackup: boolean = false): FactResult {
       }
     }
 
-    // 2. Collect all <h2 class="list"> block items with strict boundary control and smart paragraph break logic
+    // Representations 1 & 2: <h2 class="list"> blocks with image extraction & paragraph break protection
     const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
     let h2Match: RegExpExecArray | null;
 
@@ -185,13 +185,13 @@ function fetchFact(useBackup: boolean = false): FactResult {
       let imageUrl: string | null = null;
       const paragraphs: string[] = [];
 
-      // Extract image URL strictly within this block
+      // Extract image URL strictly within this block chunk
       const imgMatch = chunkBody.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
       if (imgMatch && imgMatch[1]) {
         imageUrl = imgMatch[1];
       }
 
-      // Extract all valid text paragraphs strictly within this block, breaking instantly on &nbsp; or empty <p>
+      // Extract all valid text paragraphs strictly within this block
       const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
       let pMatch: RegExpExecArray | null;
 
@@ -199,7 +199,7 @@ function fetchFact(useBackup: boolean = false): FactResult {
         const rawP = pMatch[1];
         const cleanedP = cleanHtml(rawP);
 
-        // Smart footer break: stop collecting paragraphs if encountering empty or &nbsp; paragraph
+        // Immediate break protection: if paragraph contains &nbsp; or is empty, halt paragraph collection for this block
         if (rawP.includes("&nbsp;") || cleanedP.length === 0) {
           break;
         }
@@ -222,19 +222,19 @@ function fetchFact(useBackup: boolean = false): FactResult {
       }
     }
 
-    // 3. Randomly select from unified candidate pool
+    // Pick a random fact from unified candidate pool
     if (allResults.length > 0) {
       const picked = allResults[Math.floor(Math.random() * allResults.length)];
       return picked;
     }
 
-    // 4. Fallback title parsing if candidate pool is empty
+    // Fallback title parsing if candidate pool is empty
     const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
                                html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
     if (fallbackTitleMatch && fallbackTitleMatch[1]) {
       const title = cleanHtml(fallbackTitleMatch[1]);
       if (title.length > 10) {
-        return { title, body: "", text: title, imageUrl: null, targetUrl: selectedUrl };
+        return { title: "本日冷知識", body: title, text: title, imageUrl: null, targetUrl: selectedUrl };
       }
     }
 
@@ -277,9 +277,9 @@ function checkAndRecordFact(factText: string, readOnly: boolean): boolean {
 }
 
 /**
- * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
+ * Translates English fact text into Taiwan Traditional Chinese JSON (title and text) using Gemini API (gemini-3.8-flash) with retry logic.
  */
-function translateWithGemini(englishText: string): string {
+function translateWithGemini(fact: FactResult): TranslationResult {
   return withRetry(() => {
     const props = PropertiesService.getScriptProperties();
     const apiKey = props.getProperty("GEMINI_API_KEY");
@@ -289,7 +289,15 @@ function translateWithGemini(englishText: string): string {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-    const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋或原文：\n\n${englishText}`;
+    const prompt = `請將以下英文冷知識翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。
+請以嚴格 JSON 格式輸出，結構如下：
+{
+  "title": "繁體中文動態標題",
+  "text": "繁體中文詳細內文"
+}
+
+英文冷知識標題：${fact.title || "本日冷知識"}
+英文冷知識內文：${fact.body || fact.text}`;
 
     const payload = {
       contents: [
@@ -316,22 +324,38 @@ function translateWithGemini(englishText: string): string {
     }
 
     const result = JSON.parse(response.getContentText());
-    const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const rawContent = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!chineseText) {
+    if (!rawContent) {
       throw new Error("Failed to parse response from Gemini API.");
     }
 
-    return chineseText.trim();
+    try {
+      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          title: parsed.title || fact.title || "本日冷知識",
+          text: parsed.text || rawContent.trim(),
+        };
+      }
+    } catch (e) {
+      console.warn("Failed to parse JSON from Gemini response, fallback to text format.", e);
+    }
+
+    return {
+      title: fact.title && fact.title !== "本日冷知識" ? fact.title : "本日冷知識",
+      text: rawContent.trim(),
+    };
   });
 }
 
 /**
- * Helper to construct the LINE Flex Message payload with dynamic Hero Image support.
+ * Helper to construct the LINE Flex Message payload with dynamic title and Hero Image support.
  * Ensures the complete English text (title + body) is passed to {{ENGLISH_TEXT}}.
  */
 function buildFlexMessagePayload(
-  chineseText: string,
+  chineseResult: TranslationResult,
   factData: FactResult,
   imageUrl?: string | null
 ): object {
@@ -340,7 +364,8 @@ function buildFlexMessagePayload(
     : factData.text;
 
   const jsonStr = flexTemplateString
-    .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
+    .replace("{{TITLE}}", chineseResult.title.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
+    .replace("{{CHINESE_TEXT}}", chineseResult.text.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
     .replace("{{ENGLISH_TEXT}}", fullEnglishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
 
   const flexObj = JSON.parse(jsonStr);
@@ -359,7 +384,7 @@ function buildFlexMessagePayload(
 
   return {
     type: "flex",
-    altText: "本日冷知識",
+    altText: chineseResult.title || "本日冷知識",
     contents: flexObj,
   };
 }
@@ -380,15 +405,16 @@ function fetchTranslateAndBroadcast(): void {
     }
   }
 
-  const chineseText = translateWithGemini(factData.text);
+  const chineseResult = translateWithGemini(factData);
 
   console.log("=== Execution Console Log ===");
   console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
+  console.log(`Dynamic Title: ${chineseResult.title}`);
   console.log(`Original English Fact: ${factData.text}`);
   console.log(`Image URL: ${factData.imageUrl || "None"}`);
-  console.log(`Gemini Chinese Translation: ${chineseText}`);
+  console.log(`Gemini Chinese Translation: ${chineseResult.text}`);
 
-  const flexMessage = buildFlexMessagePayload(chineseText, factData, factData.imageUrl);
+  const flexMessage = buildFlexMessagePayload(chineseResult, factData, factData.imageUrl);
 
   const props = PropertiesService.getScriptProperties().getProperties();
   const tokens: string[] = [];
@@ -464,15 +490,16 @@ function testPushToMe(): void {
   }
 
   const factData = fetchFact(false);
-  const chineseText = translateWithGemini(factData.text);
+  const chineseResult = translateWithGemini(factData);
 
   console.log("=== Test Push Console Log ===");
   console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
+  console.log(`Dynamic Title: ${chineseResult.title}`);
   console.log(`Original English Fact: ${factData.text}`);
   console.log(`Image URL: ${factData.imageUrl || "None"}`);
-  console.log(`Gemini Chinese Translation: ${chineseText}`);
+  console.log(`Gemini Chinese Translation: ${chineseResult.text}`);
 
-  const flexMessage = buildFlexMessagePayload(chineseText, factData, factData.imageUrl);
+  const flexMessage = buildFlexMessagePayload(chineseResult, factData, factData.imageUrl);
 
   withRetry(() => {
     const pushUrl = "https://api.line.me/v2/bot/message/push";
