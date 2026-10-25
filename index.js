@@ -8,11 +8,6 @@ const flexTemplateString = `{
     "backgroundColor": "#FFFFFF",
     "cornerRadius": "xl",
     "paddingAll": "xxl",
-    "action": {
-      "type": "uri",
-      "label": "action",
-      "uri": "https://www.thefactsite.com"
-    },
     "contents": [
       {
         "type": "text",
@@ -104,7 +99,7 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 10000) {
  * Scrapes a fact from a randomly selected Fact Site URL or fallback.
  * Supports 3 representations:
  * 1) <h2 class="list"> with <img> in first <p> and follow-up body <p>
- * 2) <h2 class="list"> ending with <p>&nbsp;</p> or empty <p> (triggers immediate break)
+ * 2) <h2 class="list"> ending with <p>&nbsp;</p> (triggers immediate break)
  * 3) Standalone <p class="list"> short text items (title defaults to "本日冷知識", no image/no title)
  */
 function fetchFact(useBackup = false) {
@@ -146,7 +141,7 @@ function fetchFact(useBackup = false) {
                 });
             }
         }
-        // Representations 1 & 2: <h2 class="list"> blocks with image extraction & paragraph break protection
+        // Representations 1 & 2: <h2 class="list"> blocks
         const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
         let h2Match;
         while ((h2Match = h2Regex.exec(html)) !== null) {
@@ -155,20 +150,32 @@ function fetchFact(useBackup = false) {
             const chunkBody = h2Match[2];
             let imageUrl = null;
             const paragraphs = [];
-            // Extract image URL strictly within this block chunk
-            const imgMatch = chunkBody.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
-            if (imgMatch && imgMatch[1]) {
-                imageUrl = imgMatch[1];
+            // Extract image URL strictly within this block chunk if available overall
+            const overallImgMatch = chunkBody.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+            if (overallImgMatch && overallImgMatch[1]) {
+                imageUrl = overallImgMatch[1];
             }
             // Extract all valid text paragraphs strictly within this block
             const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
             let pMatch;
             while ((pMatch = pRegex.exec(chunkBody)) !== null) {
                 const rawP = pMatch[1];
-                const cleanedP = cleanHtml(rawP);
-                // Immediate break protection: if paragraph contains &nbsp; or is empty, halt paragraph collection for this block
-                if (rawP.includes("&nbsp;") || cleanedP.length === 0) {
+                // 1. If paragraph contains <img, extract imageUrl if not already found and continue
+                if (/<img/i.test(rawP)) {
+                    const imgMatch = rawP.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
+                    if (imgMatch && imgMatch[1] && !imageUrl) {
+                        imageUrl = imgMatch[1];
+                    }
+                    continue;
+                }
+                // 2. Only break when encountering <p>&nbsp;</p> at section end
+                if (rawP.includes("&nbsp;")) {
                     break;
+                }
+                const cleanedP = cleanHtml(rawP);
+                // 3. If paragraph is empty after cleanHtml, skip and continue
+                if (cleanedP.length === 0) {
+                    continue;
                 }
                 if (cleanedP.length > 5 && !cleanedP.includes("Cookie") && !cleanedP.includes("Copyright")) {
                     paragraphs.push(cleanedP);
