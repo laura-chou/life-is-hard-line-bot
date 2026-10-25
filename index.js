@@ -96,19 +96,13 @@ function withRetry(fn, maxAttempts = 3, initialDelayMs = 10000) {
     throw lastError;
 }
 /**
- * Scrapes a fact from a randomly selected Fact Site URL or fallback.
- * Supports 3 representations:
- * 1) <h2 class="list"> with <img> in first <p> and follow-up body <p>
- * 2) <h2 class="list"> ending with <p>&nbsp;</p> (triggers immediate break)
- * 3) Standalone <p class="list"> short text items (title fixed to "本日冷知識")
+ * Scrapes facts from a single specified target URL.
+ * Extracts all candidate items (both <p class="list"> and <h2 class="list"> blocks).
  */
-function fetchFact(useBackup = false) {
+function scrapeUrlFacts(targetUrl) {
     return withRetry(() => {
-        const selectedUrl = useBackup
-            ? `${BASE_DOMAIN}/1000-interesting-facts/`
-            : factUrls[Math.floor(Math.random() * factUrls.length)];
-        console.log(`[Scraper] Selected Target URL: ${selectedUrl}`);
-        const response = UrlFetchApp.fetch(selectedUrl, {
+        console.log(`[Scraper] Fetching URL: ${targetUrl}`);
+        const response = UrlFetchApp.fetch(targetUrl, {
             muteHttpExceptions: true,
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
@@ -116,11 +110,11 @@ function fetchFact(useBackup = false) {
         });
         const statusCode = response.getResponseCode();
         if (statusCode !== 200) {
-            throw new Error(`HTTP Error ${statusCode} when fetching ${selectedUrl}`);
+            throw new Error(`HTTP Error ${statusCode} when fetching ${targetUrl}`);
         }
         const html = response.getContentText();
-        const allResults = [];
-        // Representation 3: Standalone <p class="list"> short text items (title fixed to "本日冷知識")
+        const urlResults = [];
+        // 1. Standalone <p class="list"> items
         const pListRegex = /<p\s+class="list"[^>]*>([\s\S]*?)<\/p>/gi;
         let pListMatch;
         while ((pListMatch = pListRegex.exec(html)) !== null) {
@@ -132,16 +126,16 @@ function fetchFact(useBackup = false) {
                 if (imgMatch && imgMatch[1]) {
                     imageUrl = imgMatch[1];
                 }
-                allResults.push({
+                urlResults.push({
                     title: "本日冷知識",
                     body: cleanedText,
                     text: cleanedText,
                     imageUrl: imageUrl,
-                    targetUrl: selectedUrl,
+                    targetUrl: targetUrl,
                 });
             }
         }
-        // Representations 1 & 2: <h2 class="list"> blocks
+        // 2. <h2 class="list"> blocks
         const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
         let h2Match;
         while ((h2Match = h2Regex.exec(html)) !== null) {
@@ -150,17 +144,14 @@ function fetchFact(useBackup = false) {
             const chunkBody = h2Match[2];
             let imageUrl = null;
             const paragraphs = [];
-            // Extract image URL strictly within this block chunk if available
             const overallImgMatch = chunkBody.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
             if (overallImgMatch && overallImgMatch[1]) {
                 imageUrl = overallImgMatch[1];
             }
-            // Extract all valid text paragraphs strictly within this block
             const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
             let pMatch;
             while ((pMatch = pRegex.exec(chunkBody)) !== null) {
                 const rawP = pMatch[1];
-                // 1. If paragraph contains <img, extract imageUrl if not already found and continue
                 if (/<img/i.test(rawP)) {
                     const imgMatch = rawP.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i);
                     if (imgMatch && imgMatch[1] && !imageUrl) {
@@ -168,12 +159,10 @@ function fetchFact(useBackup = false) {
                     }
                     continue;
                 }
-                // 2. Only break when encountering <p>&nbsp;</p> at section end
                 if (rawP.includes("&nbsp;")) {
                     break;
                 }
                 const cleanedP = cleanHtml(rawP);
-                // 3. If paragraph is empty after cleanHtml, skip and continue
                 if (cleanedP.length === 0) {
                     continue;
                 }
@@ -184,63 +173,71 @@ function fetchFact(useBackup = false) {
             if (title.length > 3) {
                 const bodyContent = paragraphs.join("\n\n");
                 const fullContent = bodyContent ? `${title}\n\n${bodyContent}` : title;
-                allResults.push({
-                    title,
+                urlResults.push({
+                    title: title,
                     body: bodyContent,
                     text: fullContent,
-                    imageUrl,
-                    targetUrl: selectedUrl,
+                    imageUrl: imageUrl,
+                    targetUrl: targetUrl,
                 });
             }
         }
-        // Pick a random fact from unified candidate pool
-        if (allResults.length > 0) {
-            const picked = allResults[Math.floor(Math.random() * allResults.length)];
-            return picked;
-        }
-        // Fallback title parsing if candidate pool is empty
-        const fallbackTitleMatch = html.match(/<h2 class="entry-title"[^>]*>(.*?)<\/h2>/i) ||
-            html.match(/<h1 class="entry-title"[^>]*>(.*?)<\/h1>/i);
-        if (fallbackTitleMatch && fallbackTitleMatch[1]) {
-            const title = cleanHtml(fallbackTitleMatch[1]);
-            if (title.length > 10) {
-                return { title: "本日冷知識", body: title, text: title, imageUrl: null, targetUrl: selectedUrl };
-            }
-        }
-        throw new Error(`Failed to parse fact candidate pool from ${selectedUrl}`);
+        return urlResults;
     });
 }
 /**
- * Checks Google Sheet for fact duplicates and optionally appends a new record.
- * Table structure: Row 1 = Headers, Row 2+ = [English Fact, Timestamp]
+ * Gets or opens the active Google Sheet instance.
  */
-function checkAndRecordFact(factText, readOnly) {
+function getSheet() {
     const props = PropertiesService.getScriptProperties();
     const spreadsheetId = props.getProperty("SPREADSHEET_ID");
     if (!spreadsheetId) {
         throw new Error("SPREADSHEET_ID script property is not configured.");
     }
     const ss = SpreadsheetApp.openById(spreadsheetId);
-    const sheet = ss.getSheets()[0];
+    return ss.getSheets()[0];
+}
+/**
+ * Function 1: Batch scrape target website URLs and save new facts into Google Sheet.
+ * Schema: Column A (Title), Column B (English Text), Column C (Image URL), Column D (Status), Column E (Sent Timestamp)
+ */
+function scrapeAndSaveToSheet() {
+    console.log("=== Starting Batch Scrape & Save to Sheet ===");
+    const sheet = getSheet();
     const data = sheet.getDataRange().getValues();
-    const normalizedTarget = factText.trim().toLowerCase();
-    let exists = false;
+    // Create lookup set for existing Column B (English Text) values
+    const existingEnglishTexts = new Set();
     for (let i = 1; i < data.length; i++) {
-        const existingFact = data[i][0]; // Column A is English Fact
-        if (existingFact && String(existingFact).trim().toLowerCase() === normalizedTarget) {
-            exists = true;
-            break;
+        const text = data[i][1]; // Column B is English Text
+        if (text) {
+            existingEnglishTexts.add(String(text).trim().toLowerCase());
         }
     }
-    if (!readOnly && !exists) {
-        const timestamp = new Date().toISOString();
-        sheet.appendRow([factText, timestamp]);
+    let totalNewAdded = 0;
+    for (const targetUrl of factUrls) {
+        try {
+            const candidates = scrapeUrlFacts(targetUrl);
+            console.log(`[Scraper] Found ${candidates.length} candidates from ${targetUrl}`);
+            for (const item of candidates) {
+                const normalizedText = item.text.trim().toLowerCase();
+                if (!existingEnglishTexts.has(normalizedText)) {
+                    const displayTitle = item.title && item.title.trim().length > 0 ? item.title : "本日冷知識";
+                    const imageUrlStr = item.imageUrl || "";
+                    // Append new row: Column A=Title, B=English Text, C=Image URL, D=Status, E=Sent Timestamp
+                    sheet.appendRow([displayTitle, item.text, imageUrlStr, "PENDING", ""]);
+                    existingEnglishTexts.add(normalizedText);
+                    totalNewAdded++;
+                }
+            }
+        }
+        catch (err) {
+            console.warn(`[Scraper Error] Failed to scrape ${targetUrl}: ${err?.message || err}`);
+        }
     }
-    return exists;
+    console.log(`=== Batch Scrape Finished. Added ${totalNewAdded} new facts to Google Sheet. ===`);
 }
 /**
  * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
- * Direct English to Chinese text translation without dynamic JSON formatting.
  */
 function translateWithGemini(englishText) {
     return withRetry(() => {
@@ -281,19 +278,13 @@ function translateWithGemini(englishText) {
     });
 }
 /**
- * Helper to construct the LINE Flex Message payload with dynamic title and Hero Image support.
- * Passes factData.title (or "本日冷知識") to {{TITLE}}, Chinese translation to {{CHINESE_TEXT}},
- * and full English text (title + body) to {{ENGLISH_TEXT}}.
+ * Helper to construct the LINE Flex Message payload.
  */
-function buildFlexMessagePayload(chineseText, factData, imageUrl) {
-    const displayTitle = factData.title && factData.title.trim().length > 0 ? factData.title : "本日冷知識";
-    const fullEnglishText = factData.body
-        ? (factData.title && factData.title !== "本日冷知識" ? `${factData.title}\n\n${factData.body}` : factData.body)
-        : factData.text;
+function buildFlexMessagePayload(displayTitle, chineseText, englishText, imageUrl) {
     const jsonStr = flexTemplateString
         .replace("{{TITLE}}", displayTitle.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
         .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
-        .replace("{{ENGLISH_TEXT}}", fullEnglishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
+        .replace("{{ENGLISH_TEXT}}", englishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
     const flexObj = JSON.parse(jsonStr);
     if (imageUrl && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
         flexObj.hero = {
@@ -313,27 +304,35 @@ function buildFlexMessagePayload(chineseText, factData, imageUrl) {
     };
 }
 /**
- * Production automated function to fetch daily fact, translate, broadcast to all configured LINE Bots, and record to sheet.
+ * Function 2: Daily automated function to read the first 'PENDING' row from Google Sheet,
+ * translate via Gemini, broadcast via LINE Flex Message, and update Status to 'SENT'.
  */
-function fetchTranslateAndBroadcast() {
-    let factData = fetchFact(false);
-    let isDuplicate = checkAndRecordFact(factData.text, true);
-    if (isDuplicate) {
-        console.log("[Duplicate] Primary fact is duplicate. Fetching backup fact...");
-        factData = fetchFact(true);
-        isDuplicate = checkAndRecordFact(factData.text, true);
-        if (isDuplicate) {
-            console.warn("[Duplicate] Backup fact is also duplicate. Proceeding with current fact.");
+function dailyBroadcastFromSheet() {
+    console.log("=== Starting Daily Broadcast From Sheet ===");
+    const sheet = getSheet();
+    const data = sheet.getDataRange().getValues();
+    let targetRowIndex = -1;
+    let title = "";
+    let englishText = "";
+    let imageUrl = "";
+    // Find the first row where Column D === 'PENDING'
+    for (let i = 1; i < data.length; i++) {
+        const status = data[i][3]; // Column D is Status
+        if (status && String(status).trim().toUpperCase() === "PENDING") {
+            targetRowIndex = i + 1; // 1-based row index in Spreadsheet
+            title = String(data[i][0] || "本日冷知識").trim();
+            englishText = String(data[i][1] || "").trim();
+            imageUrl = String(data[i][2] || "").trim();
+            break;
         }
     }
-    const chineseText = translateWithGemini(factData.body || factData.text);
-    console.log("=== Execution Console Log ===");
-    console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
-    console.log(`Title: ${factData.title || "本日冷知識"}`);
-    console.log(`Original English Fact: ${factData.text}`);
-    console.log(`Image URL: ${factData.imageUrl || "None"}`);
-    console.log(`Gemini Chinese Translation: ${chineseText}`);
-    const flexMessage = buildFlexMessagePayload(chineseText, factData, factData.imageUrl);
+    if (targetRowIndex === -1 || !englishText) {
+        console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
+        return;
+    }
+    console.log(`[Daily Broadcast] Processing Row ${targetRowIndex}: Title="${title}"`);
+    const chineseText = translateWithGemini(englishText);
+    const flexMessage = buildFlexMessagePayload(title, chineseText, englishText, imageUrl);
     const props = PropertiesService.getScriptProperties().getProperties();
     const tokens = [];
     for (const key of Object.keys(props)) {
@@ -367,10 +366,14 @@ function fetchTranslateAndBroadcast() {
             }
         });
     }
-    checkAndRecordFact(factData.text, false);
+    // Update sheet: Column D -> 'SENT', Column E -> ISO Timestamp
+    const nowTimestamp = new Date().toISOString();
+    sheet.getRange(targetRowIndex, 4).setValue("SENT"); // Column D
+    sheet.getRange(targetRowIndex, 5).setValue(nowTimestamp); // Column E
+    console.log(`=== Daily Broadcast Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 /**
- * Developer test function to push flex message to MY_LINE_USER_ID for layout confirmation.
+ * Developer test function to push the first 'PENDING' fact (or a live preview) to MY_LINE_USER_ID.
  */
 function testPushToMe() {
     const props = PropertiesService.getScriptProperties();
@@ -397,15 +400,40 @@ function testPushToMe() {
     if (!token) {
         throw new Error("No LINE_CHANNEL_ACCESS_TOKEN found in ScriptProperties.");
     }
-    const factData = fetchFact(false);
-    const chineseText = translateWithGemini(factData.body || factData.text);
+    let title = "本日冷知識";
+    let englishText = "";
+    let imageUrl = "";
+    try {
+        const sheet = getSheet();
+        const data = sheet.getDataRange().getValues();
+        for (let i = 1; i < data.length; i++) {
+            const status = data[i][3];
+            if (status && String(status).trim().toUpperCase() === "PENDING") {
+                title = String(data[i][0] || "本日冷知識").trim();
+                englishText = String(data[i][1] || "").trim();
+                imageUrl = String(data[i][2] || "").trim();
+                break;
+            }
+        }
+    }
+    catch (err) {
+        console.warn("Could not read sheet for test push, falling back to live scrape.", err);
+    }
+    if (!englishText) {
+        const fallbackCandidates = scrapeUrlFacts(factUrls[0]);
+        if (fallbackCandidates.length > 0) {
+            title = fallbackCandidates[0].title;
+            englishText = fallbackCandidates[0].text;
+            imageUrl = fallbackCandidates[0].imageUrl || "";
+        }
+    }
+    const chineseText = translateWithGemini(englishText);
     console.log("=== Test Push Console Log ===");
-    console.log(`Target URL: ${factData.targetUrl || "N/A"}`);
-    console.log(`Title: ${factData.title || "本日冷知識"}`);
-    console.log(`Original English Fact: ${factData.text}`);
-    console.log(`Image URL: ${factData.imageUrl || "None"}`);
+    console.log(`Title: ${title}`);
+    console.log(`Original English Fact: ${englishText}`);
+    console.log(`Image URL: ${imageUrl || "None"}`);
     console.log(`Gemini Chinese Translation: ${chineseText}`);
-    const flexMessage = buildFlexMessagePayload(chineseText, factData, factData.imageUrl);
+    const flexMessage = buildFlexMessagePayload(title, chineseText, englishText, imageUrl);
     withRetry(() => {
         const pushUrl = "https://api.line.me/v2/bot/message/push";
         const response = UrlFetchApp.fetch(pushUrl, {
@@ -426,8 +454,7 @@ function testPushToMe() {
         }
     });
 }
-globalThis.fetchTranslateAndBroadcast = fetchTranslateAndBroadcast;
+globalThis.scrapeAndSaveToSheet = scrapeAndSaveToSheet;
+globalThis.dailyBroadcastFromSheet = dailyBroadcastFromSheet;
 globalThis.testPushToMe = testPushToMe;
-globalThis.fetchFact = fetchFact;
-globalThis.checkAndRecordFact = checkAndRecordFact;
 globalThis.translateWithGemini = translateWithGemini;
