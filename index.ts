@@ -10,20 +10,10 @@ const flexTemplateString = `{
     "contents": [
       {
         "type": "text",
-        "text": "{{TITLE}}",
-        "weight": "bold",
-        "size": "xl",
-        "align": "center",
-        "color": "#1C1B1F",
-        "wrap": true
-      },
-      {
-        "type": "text",
         "text": "{{CHINESE_TEXT}}",
         "wrap": true,
         "size": "md",
         "color": "#1C1B1F",
-        "margin": "xl",
         "lineSpacing": "10px"
       },
       {
@@ -57,9 +47,7 @@ const factPaths: string[] = [
 const factUrls: string[] = factPaths.map(path => `${BASE_DOMAIN}${path}`);
 
 interface FactResult {
-  title: string;
-  body: string;
-  text: string; // Full combined text used for Column B deduplication
+  text: string; // Full text stored in Column A
   imageUrl?: string | null;
   targetUrl?: string;
 }
@@ -85,10 +73,10 @@ function cleanHtml(html: string): string {
 }
 
 /**
- * Helper to execute an operation with auto-retry up to 3 attempts.
- * Default initial delay is 10000ms (10 seconds) for server rate limit stability.
+ * Helper to execute an operation with auto-retry up to 16 attempts (interval 20000ms / 20 seconds)
+ * to remain safely within Google Apps Script's 6-minute execution limit.
  */
-function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: number = 10000): T {
+function withRetry<T>(fn: () => T, maxAttempts: number = 16, delayMs: number = 20000): T {
   let lastError: any;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -97,7 +85,7 @@ function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: numb
       lastError = err;
       console.warn(`Attempt ${attempt}/${maxAttempts} failed: ${err?.message || err}`);
       if (attempt < maxAttempts) {
-        Utilities.sleep(initialDelayMs * attempt);
+        Utilities.sleep(delayMs);
       }
     }
   }
@@ -106,7 +94,7 @@ function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: numb
 
 /**
  * Scrapes facts from a single specified target URL.
- * Extracts all candidate items (both <p class="list"> and <h2 class="list"> blocks).
+ * Extracts all candidate items (<p class="list"> and <h2 class="list"> blocks) into full text format.
  */
 function scrapeUrlFacts(targetUrl: string): FactResult[] {
   return withRetry(() => {
@@ -144,8 +132,6 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
         }
 
         urlResults.push({
-          title: "本日冷知識",
-          body: cleanedText,
           text: cleanedText,
           imageUrl: imageUrl,
           targetUrl: targetUrl,
@@ -201,8 +187,6 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
         const bodyContent = paragraphs.join("\n\n");
         const fullContent = bodyContent ? `${title}\n\n${bodyContent}` : title;
         urlResults.push({
-          title: title,
-          body: bodyContent,
           text: fullContent,
           imageUrl: imageUrl,
           targetUrl: targetUrl,
@@ -229,19 +213,19 @@ function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
 
 /**
  * Function 1: Batch scrape target website URLs and save new facts into Google Sheet.
- * Schema: Column A (Title), Column B (English Text), Column C (Image URL), Column D (Status), Column E (Sent Timestamp)
+ * Schema: Column A (English Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert), Column F (Translate)
  */
 function scrapeAndSaveToSheet(): void {
   console.log("=== Starting Batch Scrape & Save to Sheet ===");
   const sheet = getSheet();
   const data = sheet.getDataRange().getValues();
 
-  // Create lookup set for existing Column B (English Text) values
-  const existingEnglishTexts = new Set<string>();
+  // Create lookup set for existing Column A (English Text) values
+  const existingTexts = new Set<string>();
   for (let i = 1; i < data.length; i++) {
-    const text = data[i][1]; // Column B is English Text
+    const text = data[i][0]; // Column A is English Text / Content
     if (text) {
-      existingEnglishTexts.add(String(text).trim().toLowerCase());
+      existingTexts.add(String(text).trim().toLowerCase());
     }
   }
 
@@ -253,17 +237,14 @@ function scrapeAndSaveToSheet(): void {
       console.log(`[Scraper] Found ${candidates.length} candidates from ${targetUrl}`);
 
       for (const item of candidates) {
-        const compareText = (item.body && item.body.length > 0) ? item.body : item.text;
-        const normalizedText = compareText.trim().toLowerCase();
+        const normalizedText = item.text.trim().toLowerCase();
 
-        if (!existingEnglishTexts.has(normalizedText)) {
-          const displayTitle = item.title && item.title.trim().length > 0 ? item.title : "本日冷知識";
-          const englishContent = item.body || item.text;
+        if (!existingTexts.has(normalizedText)) {
           const imageUrlStr = item.imageUrl || "";
 
-          // Append new row: Column A=Title, B=English Text, C=Image URL, D=Status, E=Sent Timestamp
-          sheet.appendRow([displayTitle, englishContent, imageUrlStr, "PENDING", ""]);
-          existingEnglishTexts.add(normalizedText);
+          // Append new row: Column A=English Text, B=Image URL, C=Status("PENDING"), D=Sent Timestamp(""), E=Line Alert(""), F=Translate(1)
+          sheet.appendRow([item.text, imageUrlStr, "PENDING", "", "", 1]);
+          existingTexts.add(normalizedText);
           totalNewAdded++;
         }
       }
@@ -322,24 +303,50 @@ function translateWithGemini(englishText: string): string {
     }
 
     return chineseText.trim();
-  });
+  }, 16, 20000);
 }
 
 /**
  * Helper to construct the LINE Flex Message payload.
  */
 function buildFlexMessagePayload(
-  displayTitle: string,
+  altText: string,
   chineseText: string,
-  englishText: string,
+  englishText?: string | null,
   imageUrl?: string | null
 ): object {
-  const jsonStr = flexTemplateString
-    .replace("{{TITLE}}", displayTitle.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
-    .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
-    .replace("{{ENGLISH_TEXT}}", englishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
+  const finalAltText = altText && altText.trim().length > 0 ? altText.trim() : "有一則新訊息";
 
-  const flexObj = JSON.parse(jsonStr);
+  let flexObj: any;
+
+  if (englishText && englishText.trim().length > 0) {
+    const jsonStr = flexTemplateString
+      .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
+      .replace("{{ENGLISH_TEXT}}", englishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
+    flexObj = JSON.parse(jsonStr);
+  } else {
+    flexObj = {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        backgroundColor: "#FFFFFF",
+        cornerRadius: "xl",
+        paddingAll: "xxl",
+        contents: [
+          {
+            type: "text",
+            text: chineseText,
+            wrap: true,
+            size: "md",
+            color: "#1C1B1F",
+            lineSpacing: "10px"
+          }
+        ]
+      }
+    };
+  }
 
   if (imageUrl && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
     flexObj.hero = {
@@ -355,14 +362,14 @@ function buildFlexMessagePayload(
 
   return {
     type: "flex",
-    altText: displayTitle,
+    altText: finalAltText,
     contents: flexObj,
   };
 }
 
 /**
  * Function 2: Daily automated function to read the first 'PENDING' row from Google Sheet,
- * translate via Gemini, broadcast via LINE Flex Message, and update Status to 'SENT'.
+ * translate via Gemini if Column F requires it, broadcast via LINE Flex Message, and update Status to 'SENT'.
  */
 function dailyBroadcastFromSheet(): void {
   console.log("=== Starting Daily Broadcast From Sheet ===");
@@ -370,31 +377,51 @@ function dailyBroadcastFromSheet(): void {
   const data = sheet.getDataRange().getValues();
 
   let targetRowIndex = -1;
-  let title = "";
-  let englishText = "";
+  let text = "";
   let imageUrl = "";
+  let lineAlert = "";
+  let shouldTranslate = true;
 
-  // Find the first row where Column D === 'PENDING'
+  // Find the first row where Column C === 'PENDING'
   for (let i = 1; i < data.length; i++) {
-    const status = data[i][3]; // Column D is Status
+    const status = data[i][2]; // Column C is Status
     if (status && String(status).trim().toUpperCase() === "PENDING") {
       targetRowIndex = i + 1; // 1-based row index in Spreadsheet
-      title = String(data[i][0] || "本日冷知識").trim();
-      englishText = String(data[i][1] || "").trim();
-      imageUrl = String(data[i][2] || "").trim();
+      text = String(data[i][0] || "").trim(); // Column A
+      imageUrl = String(data[i][1] || "").trim(); // Column B
+      lineAlert = String(data[i][4] || "").trim(); // Column E
+
+      const translateVal = data[i][5]; // Column F
+      if (translateVal !== undefined && translateVal !== null && translateVal !== "") {
+        const trStr = String(translateVal).trim().toLowerCase();
+        shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
+      } else {
+        shouldTranslate = true;
+      }
       break;
     }
   }
 
-  if (targetRowIndex === -1 || !englishText) {
+  if (targetRowIndex === -1 || !text) {
     console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
     return;
   }
 
-  console.log(`[Daily Broadcast] Processing Row ${targetRowIndex}: Title="${title}"`);
+  console.log(`[Daily Broadcast] Processing Row ${targetRowIndex}: Content="${text.substring(0, 30)}..."`);
 
-  const chineseText = translateWithGemini(englishText);
-  const flexMessage = buildFlexMessagePayload(title, chineseText, englishText, imageUrl);
+  const altText = lineAlert || "有一則新訊息";
+  let chineseText = "";
+  let englishText: string | null = null;
+
+  if (shouldTranslate) {
+    chineseText = translateWithGemini(text);
+    englishText = text;
+  } else {
+    chineseText = text;
+    englishText = null;
+  }
+
+  const flexMessage = buildFlexMessagePayload(altText, chineseText, englishText, imageUrl);
 
   const props = PropertiesService.getScriptProperties().getProperties();
   const tokens: string[] = [];
@@ -434,10 +461,10 @@ function dailyBroadcastFromSheet(): void {
     });
   }
 
-  // Update sheet: Column D -> 'SENT', Column E -> ISO Timestamp
+  // Update sheet: Column C -> 'SENT', Column D -> ISO Timestamp
   const nowTimestamp = new Date().toISOString();
-  sheet.getRange(targetRowIndex, 4).setValue("SENT"); // Column D
-  sheet.getRange(targetRowIndex, 5).setValue(nowTimestamp); // Column E
+  sheet.getRange(targetRowIndex, 3).setValue("SENT"); // Column C
+  sheet.getRange(targetRowIndex, 4).setValue(nowTimestamp); // Column D
 
   console.log(`=== Daily Broadcast Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
@@ -479,39 +506,58 @@ function testPushToMe(): void {
   const data = sheet.getDataRange().getValues();
 
   let targetRowIndex = -1;
-  let title = "本日冷知識";
-  let englishText = "";
+  let text = "";
   let imageUrl = "";
+  let lineAlert = "";
+  let shouldTranslate = true;
 
-  // Find the first row where Column D === 'PENDING'
+  // Find the first row where Column C === 'PENDING'
   for (let i = 1; i < data.length; i++) {
-    const status = data[i][3]; // Column D is Status
+    const status = data[i][2]; // Column C is Status
     if (status && String(status).trim().toUpperCase() === "PENDING") {
       targetRowIndex = i + 1; // 1-based row index in Spreadsheet
-      title = String(data[i][0] || "本日冷知識").trim();
-      englishText = String(data[i][1] || "").trim();
-      imageUrl = String(data[i][2] || "").trim();
+      text = String(data[i][0] || "").trim(); // Column A
+      imageUrl = String(data[i][1] || "").trim(); // Column B
+      lineAlert = String(data[i][4] || "").trim(); // Column E
+
+      const translateVal = data[i][5]; // Column F
+      if (translateVal !== undefined && translateVal !== null && translateVal !== "") {
+        const trStr = String(translateVal).trim().toLowerCase();
+        shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
+      } else {
+        shouldTranslate = true;
+      }
       break;
     }
   }
 
-  if (targetRowIndex === -1 || !englishText) {
+  if (targetRowIndex === -1 || !text) {
     console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
     return;
   }
 
-  console.log(`[Test Push] Processing Row ${targetRowIndex}: Title="${title}"`);
+  console.log(`[Test Push] Processing Row ${targetRowIndex}: Content="${text.substring(0, 30)}..."`);
 
-  const chineseText = translateWithGemini(englishText);
+  const altText = lineAlert || "有一則新訊息";
+  let chineseText = "";
+  let englishText: string | null = null;
+
+  if (shouldTranslate) {
+    chineseText = translateWithGemini(text);
+    englishText = text;
+  } else {
+    chineseText = text;
+    englishText = null;
+  }
 
   console.log("=== Test Push Console Log ===");
   console.log(`Row Index: ${targetRowIndex}`);
-  console.log(`Title: ${title}`);
-  console.log(`Original English Fact: ${englishText}`);
+  console.log(`Line Alert (altText): ${altText}`);
+  console.log(`Original Text: ${text}`);
   console.log(`Image URL: ${imageUrl || "None"}`);
   console.log(`Gemini Chinese Translation: ${chineseText}`);
 
-  const flexMessage = buildFlexMessagePayload(title, chineseText, englishText, imageUrl);
+  const flexMessage = buildFlexMessagePayload(altText, chineseText, englishText, imageUrl);
 
   withRetry(() => {
     const pushUrl = "https://api.line.me/v2/bot/message/push";
@@ -534,10 +580,10 @@ function testPushToMe(): void {
     }
   });
 
-  // Update sheet: Column D -> 'SENT', Column E -> ISO Timestamp upon successful push
+  // Update sheet: Column C -> 'SENT', Column D -> ISO Timestamp upon successful push
   const nowTimestamp = new Date().toISOString();
-  sheet.getRange(targetRowIndex, 4).setValue("SENT"); // Column D
-  sheet.getRange(targetRowIndex, 5).setValue(nowTimestamp); // Column E
+  sheet.getRange(targetRowIndex, 3).setValue("SENT"); // Column C
+  sheet.getRange(targetRowIndex, 4).setValue(nowTimestamp); // Column D
 
   console.log(`=== Test Push Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
