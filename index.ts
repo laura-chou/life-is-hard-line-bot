@@ -56,6 +56,11 @@ const factPaths: string[] = [
 
 const factUrls: string[] = factPaths.map(path => `${BASE_DOMAIN}${path}`);
 
+const quotefancyUrls: string[] = [
+  "https://quotefancy.com/demotivational-quotes",
+  "https://quotefancy.com/demotivational-quotes/page/2",
+];
+
 interface FactResult {
   title: string;
   body: string;
@@ -105,12 +110,12 @@ function withRetry<T>(fn: () => T, maxAttempts: number = 3, initialDelayMs: numb
 }
 
 /**
- * Scrapes facts from a single specified target URL.
+ * Scrapes facts from a single specified target URL (thefactsite.com).
  * Extracts all candidate items (both <p class="list"> and <h2 class="list"> blocks).
  */
 function scrapeUrlFacts(targetUrl: string): FactResult[] {
   return withRetry(() => {
-    console.log(`[Scraper] Fetching URL: ${targetUrl}`);
+    console.log(`[Scraper Fact] Fetching URL: ${targetUrl}`);
 
     const response = UrlFetchApp.fetch(targetUrl, {
       muteHttpExceptions: true,
@@ -215,6 +220,69 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
 }
 
 /**
+ * Scrapes demotivational quotes from a single specified Quotefancy target URL.
+ * Extracts candidate items from <div class="q-wrapper"> blocks.
+ */
+function scrapeQuotefancyUrl(targetUrl: string): FactResult[] {
+  return withRetry(() => {
+    console.log(`[Scraper Quotefancy] Fetching URL: ${targetUrl}`);
+
+    const response = UrlFetchApp.fetch(targetUrl, {
+      muteHttpExceptions: true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+      },
+    });
+
+    const statusCode = response.getResponseCode();
+    if (statusCode !== 200) {
+      throw new Error(`HTTP Error ${statusCode} when fetching ${targetUrl}`);
+    }
+
+    const html = response.getContentText();
+    const urlResults: FactResult[] = [];
+
+    const wrapperRegex = /<div\s+class="q-wrapper"[^>]*>([\s\S]*?)(?=<div\s+class="q-wrapper"|$)/gi;
+    let wrapperMatch: RegExpExecArray | null;
+
+    while ((wrapperMatch = wrapperRegex.exec(html)) !== null) {
+      const wrapperHtml = wrapperMatch[1];
+
+      const quoteMatch = wrapperHtml.match(/<a\s+class="quote-a"[^>]*>([\s\S]*?)<\/a>/i);
+      if (!quoteMatch) continue;
+
+      const rawQuote = quoteMatch[1];
+      const quoteText = cleanHtml(rawQuote);
+      if (!quoteText) continue;
+
+      const authorMatch = wrapperHtml.match(/<p\s+class="author-p"[^>]*>([\s\S]*?)<\/p>/i);
+      let authorName = "";
+      if (authorMatch && authorMatch[1]) {
+        let cleanedAuthor = cleanHtml(authorMatch[1]);
+        cleanedAuthor = cleanedAuthor.replace(/^[-_\s]+/, "").trim();
+        authorName = cleanedAuthor;
+      }
+
+      let fullEnglishText = quoteText;
+      if (authorName) {
+        fullEnglishText = `${quoteText}\n- ${authorName}`;
+      }
+
+      urlResults.push({
+        title: "本日語錄",
+        body: fullEnglishText,
+        text: fullEnglishText,
+        imageUrl: "",
+        targetUrl: targetUrl,
+      });
+    }
+
+    return urlResults;
+  });
+}
+
+/**
  * Gets or opens the active Google Sheet instance.
  */
 function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
@@ -228,7 +296,7 @@ function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
 }
 
 /**
- * Function 1: Batch scrape target website URLs and save new facts into Google Sheet.
+ * Function 1: Batch scrape target website URLs and save new facts/quotes into Google Sheet.
  * Schema: Column A (Title), Column B (English Text), Column C (Image URL), Column D (Status), Column E (Sent Timestamp)
  */
 function scrapeAndSaveToSheet(): void {
@@ -247,10 +315,11 @@ function scrapeAndSaveToSheet(): void {
 
   let totalNewAdded = 0;
 
+  // 1. Scrape factUrls (thefactsite.com)
   for (const targetUrl of factUrls) {
     try {
       const candidates = scrapeUrlFacts(targetUrl);
-      console.log(`[Scraper] Found ${candidates.length} candidates from ${targetUrl}`);
+      console.log(`[Scraper Fact] Found ${candidates.length} candidates from ${targetUrl}`);
 
       for (const item of candidates) {
         const compareText = (item.body && item.body.length > 0) ? item.body : item.text;
@@ -261,7 +330,6 @@ function scrapeAndSaveToSheet(): void {
           const englishContent = item.body || item.text;
           const imageUrlStr = item.imageUrl || "";
 
-          // Append new row: Column A=Title, B=English Text, C=Image URL, D=Status, E=Sent Timestamp
           sheet.appendRow([displayTitle, englishContent, imageUrlStr, "PENDING", ""]);
           existingEnglishTexts.add(normalizedText);
           totalNewAdded++;
@@ -272,11 +340,36 @@ function scrapeAndSaveToSheet(): void {
     }
   }
 
-  console.log(`=== Batch Scrape Finished. Added ${totalNewAdded} new facts to Google Sheet. ===`);
+  // 2. Scrape quotefancyUrls (quotefancy.com)
+  for (const targetUrl of quotefancyUrls) {
+    try {
+      const candidates = scrapeQuotefancyUrl(targetUrl);
+      console.log(`[Scraper Quotefancy] Found ${candidates.length} candidates from ${targetUrl}`);
+
+      for (const item of candidates) {
+        const compareText = (item.body && item.body.length > 0) ? item.body : item.text;
+        const normalizedText = compareText.trim().toLowerCase();
+
+        if (!existingEnglishTexts.has(normalizedText)) {
+          const displayTitle = item.title && item.title.trim().length > 0 ? item.title : "本日語錄";
+          const englishContent = item.body || item.text;
+          const imageUrlStr = item.imageUrl || "";
+
+          sheet.appendRow([displayTitle, englishContent, imageUrlStr, "PENDING", ""]);
+          existingEnglishTexts.add(normalizedText);
+          totalNewAdded++;
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Scraper Error] Failed to scrape ${targetUrl}: ${err?.message || err}`);
+    }
+  }
+
+  console.log(`=== Batch Scrape Finished. Added ${totalNewAdded} new entries to Google Sheet. ===`);
 }
 
 /**
- * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
+ * Translates English text (facts or quotes) into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
  */
 function translateWithGemini(englishText: string): string {
   return withRetry(() => {
@@ -288,7 +381,7 @@ function translateWithGemini(englishText: string): string {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-    const prompt = `請將以下英文冷知識內容翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋、標題或英文原文：\n\n${englishText}`;
+    const prompt = `請將以下英文內容（冷知識或名言短句）翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋、標題或英文原文：\n\n${englishText}`;
 
     const payload = {
       contents: [
@@ -361,7 +454,7 @@ function buildFlexMessagePayload(
 }
 
 /**
- * Function 2: Daily automated function to read the first 'PENDING' row from Google Sheet,
+ * Function 2: Daily automated function to randomly select a 'PENDING' row from Google Sheet,
  * translate via Gemini, broadcast via LINE Flex Message, and update Status to 'SENT'.
  */
 function dailyBroadcastFromSheet(): void {
@@ -369,32 +462,42 @@ function dailyBroadcastFromSheet(): void {
   const sheet = getSheet();
   const data = sheet.getDataRange().getValues();
 
-  let targetRowIndex = -1;
-  let title = "";
-  let englishText = "";
-  let imageUrl = "";
+  interface PendingRow {
+    rowIndex: number; // 1-based row index in Google Sheet
+    title: string;
+    englishText: string;
+    imageUrl: string;
+  }
 
-  // Find the first row where Column D === 'PENDING'
+  const pendingRows: PendingRow[] = [];
+
+  // Collect all rows where Column D === 'PENDING'
   for (let i = 1; i < data.length; i++) {
     const status = data[i][3]; // Column D is Status
-    if (status && String(status).trim().toUpperCase() === "PENDING") {
-      targetRowIndex = i + 1; // 1-based row index in Spreadsheet
-      title = String(data[i][0] || "本日冷知識").trim();
-      englishText = String(data[i][1] || "").trim();
-      imageUrl = String(data[i][2] || "").trim();
-      break;
+    const text = String(data[i][1] || "").trim();
+    if (status && String(status).trim().toUpperCase() === "PENDING" && text) {
+      pendingRows.push({
+        rowIndex: i + 1,
+        title: String(data[i][0] || "本日冷知識").trim(),
+        englishText: text,
+        imageUrl: String(data[i][2] || "").trim(),
+      });
     }
   }
 
-  if (targetRowIndex === -1 || !englishText) {
-    console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
+  if (pendingRows.length === 0) {
+    console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' records found in Google Sheet.");
     return;
   }
 
-  console.log(`[Daily Broadcast] Processing Row ${targetRowIndex}: Title="${title}"`);
+  // Randomly select one pending item
+  const randomIndex = Math.floor(Math.random() * pendingRows.length);
+  const target = pendingRows[randomIndex];
 
-  const chineseText = translateWithGemini(englishText);
-  const flexMessage = buildFlexMessagePayload(title, chineseText, englishText, imageUrl);
+  console.log(`[Daily Broadcast] Selected Random Row ${target.rowIndex} (out of ${pendingRows.length} PENDING items): Title="${target.title}"`);
+
+  const chineseText = translateWithGemini(target.englishText);
+  const flexMessage = buildFlexMessagePayload(target.title, chineseText, target.englishText, target.imageUrl);
 
   const props = PropertiesService.getScriptProperties().getProperties();
   const tokens: string[] = [];
@@ -436,14 +539,14 @@ function dailyBroadcastFromSheet(): void {
 
   // Update sheet: Column D -> 'SENT', Column E -> ISO Timestamp
   const nowTimestamp = new Date().toISOString();
-  sheet.getRange(targetRowIndex, 4).setValue("SENT"); // Column D
-  sheet.getRange(targetRowIndex, 5).setValue(nowTimestamp); // Column E
+  sheet.getRange(target.rowIndex, 4).setValue("SENT"); // Column D
+  sheet.getRange(target.rowIndex, 5).setValue(nowTimestamp); // Column E
 
-  console.log(`=== Daily Broadcast Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
+  console.log(`=== Daily Broadcast Successful! Updated Row ${target.rowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 
 /**
- * Developer test function to push the first 'PENDING' fact to MY_LINE_USER_ID
+ * Developer test function to randomly push a 'PENDING' item to MY_LINE_USER_ID
  * and update its status to 'SENT' with Sent Timestamp upon successful push.
  */
 function testPushToMe(): void {
@@ -478,40 +581,50 @@ function testPushToMe(): void {
   const sheet = getSheet();
   const data = sheet.getDataRange().getValues();
 
-  let targetRowIndex = -1;
-  let title = "本日冷知識";
-  let englishText = "";
-  let imageUrl = "";
+  interface PendingRow {
+    rowIndex: number; // 1-based row index in Google Sheet
+    title: string;
+    englishText: string;
+    imageUrl: string;
+  }
 
-  // Find the first row where Column D === 'PENDING'
+  const pendingRows: PendingRow[] = [];
+
+  // Collect all rows where Column D === 'PENDING'
   for (let i = 1; i < data.length; i++) {
     const status = data[i][3]; // Column D is Status
-    if (status && String(status).trim().toUpperCase() === "PENDING") {
-      targetRowIndex = i + 1; // 1-based row index in Spreadsheet
-      title = String(data[i][0] || "本日冷知識").trim();
-      englishText = String(data[i][1] || "").trim();
-      imageUrl = String(data[i][2] || "").trim();
-      break;
+    const text = String(data[i][1] || "").trim();
+    if (status && String(status).trim().toUpperCase() === "PENDING" && text) {
+      pendingRows.push({
+        rowIndex: i + 1,
+        title: String(data[i][0] || "本日冷知識").trim(),
+        englishText: text,
+        imageUrl: String(data[i][2] || "").trim(),
+      });
     }
   }
 
-  if (targetRowIndex === -1 || !englishText) {
-    console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
+  if (pendingRows.length === 0) {
+    console.warn("⚠️ [Test Push Warning] No 'PENDING' records found in Google Sheet.");
     return;
   }
 
-  console.log(`[Test Push] Processing Row ${targetRowIndex}: Title="${title}"`);
+  // Randomly select one pending item
+  const randomIndex = Math.floor(Math.random() * pendingRows.length);
+  const target = pendingRows[randomIndex];
 
-  const chineseText = translateWithGemini(englishText);
+  console.log(`[Test Push] Selected Random Row ${target.rowIndex} (out of ${pendingRows.length} PENDING items): Title="${target.title}"`);
+
+  const chineseText = translateWithGemini(target.englishText);
 
   console.log("=== Test Push Console Log ===");
-  console.log(`Row Index: ${targetRowIndex}`);
-  console.log(`Title: ${title}`);
-  console.log(`Original English Fact: ${englishText}`);
-  console.log(`Image URL: ${imageUrl || "None"}`);
+  console.log(`Row Index: ${target.rowIndex}`);
+  console.log(`Title: ${target.title}`);
+  console.log(`Original English Text: ${target.englishText}`);
+  console.log(`Image URL: ${target.imageUrl || "None"}`);
   console.log(`Gemini Chinese Translation: ${chineseText}`);
 
-  const flexMessage = buildFlexMessagePayload(title, chineseText, englishText, imageUrl);
+  const flexMessage = buildFlexMessagePayload(target.title, chineseText, target.englishText, target.imageUrl);
 
   withRetry(() => {
     const pushUrl = "https://api.line.me/v2/bot/message/push";
@@ -536,10 +649,10 @@ function testPushToMe(): void {
 
   // Update sheet: Column D -> 'SENT', Column E -> ISO Timestamp upon successful push
   const nowTimestamp = new Date().toISOString();
-  sheet.getRange(targetRowIndex, 4).setValue("SENT"); // Column D
-  sheet.getRange(targetRowIndex, 5).setValue(nowTimestamp); // Column E
+  sheet.getRange(target.rowIndex, 4).setValue("SENT"); // Column D
+  sheet.getRange(target.rowIndex, 5).setValue(nowTimestamp); // Column E
 
-  console.log(`=== Test Push Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
+  console.log(`=== Test Push Successful! Updated Row ${target.rowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 
 (globalThis as any).scrapeAndSaveToSheet = scrapeAndSaveToSheet;
