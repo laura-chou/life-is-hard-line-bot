@@ -220,27 +220,73 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
 }
 
 /**
+ * Helper to fetch Quotefancy HTML content.
+ * Attempts direct request with browser header emulation first; falls back to Web Proxy if HTTP 403 / anti-bot block occurs.
+ */
+function fetchQuotefancyHtml(targetUrl: string): string {
+  const customHeaders = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+  };
+
+  try {
+    console.log(`[Scraper Quotefancy] Direct fetching URL: ${targetUrl}`);
+    const response = UrlFetchApp.fetch(targetUrl, {
+      muteHttpExceptions: true,
+      headers: customHeaders,
+    });
+
+    const statusCode = response.getResponseCode();
+    if (statusCode === 200) {
+      const html = response.getContentText();
+      if (html && html.includes("q-wrapper")) {
+        return html;
+      }
+    }
+
+    console.warn(`[Scraper Quotefancy] Direct fetch returned status ${statusCode}. Trying proxy fallback...`);
+  } catch (err: any) {
+    console.warn(`[Scraper Quotefancy] Direct fetch failed: ${err?.message || err}. Trying proxy fallback...`);
+  }
+
+  // Fallback to Web Proxy (api.allorigins.win) to bypass 403 / anti-bot block
+  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+  console.log(`[Scraper Quotefancy] Fetching via proxy: ${proxyUrl}`);
+
+  const proxyResponse = UrlFetchApp.fetch(proxyUrl, {
+    muteHttpExceptions: true,
+  });
+
+  const proxyStatusCode = proxyResponse.getResponseCode();
+  if (proxyStatusCode !== 200) {
+    throw new Error(`Proxy request failed with HTTP ${proxyStatusCode} for ${targetUrl}`);
+  }
+
+  const jsonResult = JSON.parse(proxyResponse.getContentText());
+  if (!jsonResult || !jsonResult.contents) {
+    throw new Error(`Invalid response structure from proxy for ${targetUrl}`);
+  }
+
+  return jsonResult.contents;
+}
+
+/**
  * Scrapes demotivational quotes from a single specified Quotefancy target URL.
  * Extracts candidate items from <div class="q-wrapper"> blocks.
  */
 function scrapeQuotefancyUrl(targetUrl: string): FactResult[] {
   return withRetry(() => {
-    console.log(`[Scraper Quotefancy] Fetching URL: ${targetUrl}`);
-
-    const response = UrlFetchApp.fetch(targetUrl, {
-      muteHttpExceptions: true,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-      },
-    });
-
-    const statusCode = response.getResponseCode();
-    if (statusCode !== 200) {
-      throw new Error(`HTTP Error ${statusCode} when fetching ${targetUrl}`);
-    }
-
-    const html = response.getContentText();
+    const html = fetchQuotefancyHtml(targetUrl);
     const urlResults: FactResult[] = [];
 
     const wrapperRegex = /<div\s+class="q-wrapper"[^>]*>([\s\S]*?)(?=<div\s+class="q-wrapper"|$)/gi;
