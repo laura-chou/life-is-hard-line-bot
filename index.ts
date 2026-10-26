@@ -43,18 +43,15 @@ const BASE_DOMAIN = "https://www.thefactsite.com";
 
 const factPaths: string[] = [
   "/1000-interesting-facts/",
-  "/top-100-random-funny-facts/",
   "/1000-interesting-facts/2/",
   "/1000-interesting-facts/3/",
   "/1000-interesting-facts/4/",
   "/1000-interesting-facts/5/",
+  "/top-100-random-funny-facts/",
   "/100-strange-but-true-facts/",
   "/100-mind-blowing-facts/",
   "/100-space-facts/",
-  "/100-halloween-facts/",
   "/100-random-food-facts/",
-  "/facts-everyone-should-know/",
-  "/dinosaur-facts/"
 ];
 
 const factUrls: string[] = factPaths.map(path => `${BASE_DOMAIN}${path}`);
@@ -157,7 +154,7 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
     }
 
     // 2. <h2 class="list"> blocks
-    const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|$)/gi;
+    const h2Regex = /<h2\s+class="list"[^>]*>(.*?)<\/h2>([\s\S]*?)(?=<h2\s+class="list"|<p\s+class="list"|$)/gi;
     let h2Match: RegExpExecArray | null;
 
     while ((h2Match = h2Regex.exec(html)) !== null) {
@@ -187,12 +184,11 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
           continue;
         }
 
-        if (rawP.includes("&nbsp;")) {
-          break;
-        }
-
         const cleanedP = cleanHtml(rawP);
-        if (cleanedP.length === 0) {
+        if (cleanedP === "" || rawP.trim() === "&nbsp;") {
+          if (paragraphs.length > 0) {
+            break;
+          }
           continue;
         }
 
@@ -257,13 +253,16 @@ function scrapeAndSaveToSheet(): void {
       console.log(`[Scraper] Found ${candidates.length} candidates from ${targetUrl}`);
 
       for (const item of candidates) {
-        const normalizedText = item.text.trim().toLowerCase();
+        const compareText = (item.body && item.body.length > 0) ? item.body : item.text;
+        const normalizedText = compareText.trim().toLowerCase();
+
         if (!existingEnglishTexts.has(normalizedText)) {
           const displayTitle = item.title && item.title.trim().length > 0 ? item.title : "本日冷知識";
+          const englishContent = item.body || item.text;
           const imageUrlStr = item.imageUrl || "";
 
           // Append new row: Column A=Title, B=English Text, C=Image URL, D=Status, E=Sent Timestamp
-          sheet.appendRow([displayTitle, item.text, imageUrlStr, "PENDING", ""]);
+          sheet.appendRow([displayTitle, englishContent, imageUrlStr, "PENDING", ""]);
           existingEnglishTexts.add(normalizedText);
           totalNewAdded++;
         }
