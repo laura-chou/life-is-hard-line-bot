@@ -373,7 +373,8 @@ function dailyBroadcastFromSheet() {
     console.log(`=== Daily Broadcast Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 /**
- * Developer test function to push the first 'PENDING' fact (or a live preview) to MY_LINE_USER_ID.
+ * Developer test function to push the first 'PENDING' fact to MY_LINE_USER_ID
+ * and update its status to 'SENT' with Sent Timestamp upon successful push.
  */
 function testPushToMe() {
     const props = PropertiesService.getScriptProperties();
@@ -400,35 +401,31 @@ function testPushToMe() {
     if (!token) {
         throw new Error("No LINE_CHANNEL_ACCESS_TOKEN found in ScriptProperties.");
     }
+    const sheet = getSheet();
+    const data = sheet.getDataRange().getValues();
+    let targetRowIndex = -1;
     let title = "本日冷知識";
     let englishText = "";
     let imageUrl = "";
-    try {
-        const sheet = getSheet();
-        const data = sheet.getDataRange().getValues();
-        for (let i = 1; i < data.length; i++) {
-            const status = data[i][3];
-            if (status && String(status).trim().toUpperCase() === "PENDING") {
-                title = String(data[i][0] || "本日冷知識").trim();
-                englishText = String(data[i][1] || "").trim();
-                imageUrl = String(data[i][2] || "").trim();
-                break;
-            }
+    // Find the first row where Column D === 'PENDING'
+    for (let i = 1; i < data.length; i++) {
+        const status = data[i][3]; // Column D is Status
+        if (status && String(status).trim().toUpperCase() === "PENDING") {
+            targetRowIndex = i + 1; // 1-based row index in Spreadsheet
+            title = String(data[i][0] || "本日冷知識").trim();
+            englishText = String(data[i][1] || "").trim();
+            imageUrl = String(data[i][2] || "").trim();
+            break;
         }
     }
-    catch (err) {
-        console.warn("Could not read sheet for test push, falling back to live scrape.", err);
+    if (targetRowIndex === -1 || !englishText) {
+        console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
+        return;
     }
-    if (!englishText) {
-        const fallbackCandidates = scrapeUrlFacts(factUrls[0]);
-        if (fallbackCandidates.length > 0) {
-            title = fallbackCandidates[0].title;
-            englishText = fallbackCandidates[0].text;
-            imageUrl = fallbackCandidates[0].imageUrl || "";
-        }
-    }
+    console.log(`[Test Push] Processing Row ${targetRowIndex}: Title="${title}"`);
     const chineseText = translateWithGemini(englishText);
     console.log("=== Test Push Console Log ===");
+    console.log(`Row Index: ${targetRowIndex}`);
     console.log(`Title: ${title}`);
     console.log(`Original English Fact: ${englishText}`);
     console.log(`Image URL: ${imageUrl || "None"}`);
@@ -453,6 +450,11 @@ function testPushToMe() {
             throw new Error(`LINE Push API failed with status ${response.getResponseCode()}: ${response.getContentText()}`);
         }
     });
+    // Update sheet: Column D -> 'SENT', Column E -> ISO Timestamp upon successful push
+    const nowTimestamp = new Date().toISOString();
+    sheet.getRange(targetRowIndex, 4).setValue("SENT"); // Column D
+    sheet.getRange(targetRowIndex, 5).setValue(nowTimestamp); // Column E
+    console.log(`=== Test Push Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 globalThis.scrapeAndSaveToSheet = scrapeAndSaveToSheet;
 globalThis.dailyBroadcastFromSheet = dailyBroadcastFromSheet;
