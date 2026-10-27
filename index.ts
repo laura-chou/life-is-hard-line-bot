@@ -10,19 +10,10 @@ const flexTemplateString = `{
     "contents": [
       {
         "type": "text",
-        "text": "{{CHINESE_TEXT}}",
+        "text": "{{TEXT}}",
         "wrap": true,
         "size": "md",
         "color": "#1C1B1F",
-        "lineSpacing": "10px"
-      },
-      {
-        "type": "text",
-        "text": "{{ENGLISH_TEXT}}",
-        "wrap": true,
-        "size": "sm",
-        "color": "#666666",
-        "margin": "xxl",
         "lineSpacing": "10px"
       }
     ]
@@ -57,7 +48,6 @@ interface PendingFact {
   text: string;
   imageUrl: string;
   lineAlert: string;
-  shouldTranslate: boolean;
 }
 
 /**
@@ -81,10 +71,9 @@ function cleanHtml(html: string): string {
 }
 
 /**
- * Helper to execute an operation with auto-retry up to 16 attempts (interval 20000ms / 20 seconds)
- * to remain safely within Google Apps Script's 6-minute execution limit.
+ * Helper to execute an operation with auto-retry up to 3 attempts.
  */
-function withRetry<T>(fn: () => T, maxAttempts: number = 16, delayMs: number = 20000): T {
+function withRetry<T>(fn: () => T, maxAttempts: number = 3, delayMs: number = 5000): T {
   let lastError: any;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -176,6 +165,7 @@ function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
 /**
  * Modular helper function to collect all 'PENDING' records from the Google Sheet
  * and select one randomly. Returns null if no PENDING records are found.
+ * Schema: Column A (Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert)
  */
 function getRandomPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): PendingFact | null {
   const data = sheet.getDataRange().getValues();
@@ -190,19 +180,11 @@ function getRandomPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): Pendin
       const imageUrl = String(data[i][1] || "").trim(); // Column B
       const lineAlert = String(data[i][4] || "").trim(); // Column E
 
-      let shouldTranslate = true;
-      const translateVal = data[i][5]; // Column F
-      if (translateVal !== undefined && translateVal !== null && translateVal !== "") {
-        const trStr = String(translateVal).trim().toLowerCase();
-        shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
-      }
-
       pendingFacts.push({
         rowIndex: i + 1, // 1-based row index in Spreadsheet
         text,
         imageUrl,
         lineAlert,
-        shouldTranslate,
       });
     }
   }
@@ -330,17 +312,17 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
 
 /**
  * Function 1: Batch scrape target website URLs and save new facts into Google Sheet.
- * Schema: Column A (English Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert), Column F (Translate)
+ * Schema: Column A (Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert)
  */
 function scrapeAndSaveToSheet(): void {
   console.log("=== Starting Batch Scrape & Save to Sheet ===");
   const sheet = getSheet();
   const data = sheet.getDataRange().getValues();
 
-  // Create lookup set for existing Column A (English Text) values
+  // Create lookup set for existing Column A (Text) values
   const existingTexts = new Set<string>();
   for (let i = 1; i < data.length; i++) {
-    const text = data[i][0]; // Column A is English Text / Content
+    const text = data[i][0]; // Column A is Text
     if (text) {
       existingTexts.add(String(text).trim().toLowerCase());
     }
@@ -359,8 +341,8 @@ function scrapeAndSaveToSheet(): void {
         if (!existingTexts.has(normalizedText)) {
           const imageUrlStr = item.imageUrl || "";
 
-          // Append new row: Column A=English Text, B=Image URL, C=Status("PENDING"), D=Sent Timestamp(""), E=Line Alert(""), F=Translate(1)
-          sheet.appendRow([item.text, imageUrlStr, "PENDING", "", "", 1]);
+          // Append new row: Column A=Text, B=Image URL, C=Status("PENDING"), D=Sent Timestamp(""), E=Line Alert("")
+          sheet.appendRow([item.text, imageUrlStr, "PENDING", "", ""]);
           existingTexts.add(normalizedText);
           totalNewAdded++;
         }
@@ -374,103 +356,21 @@ function scrapeAndSaveToSheet(): void {
 }
 
 /**
- * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
- * Sends push alert notification upon 16 consecutive failures.
- */
-function translateWithGemini(englishText: string): string {
-  try {
-    return withRetry(() => {
-      const props = PropertiesService.getScriptProperties();
-      const apiKey = props.getProperty("GEMINI_API_KEY");
-      if (!apiKey) {
-        throw new Error("GEMINI_API_KEY script property is not configured.");
-      }
-
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-
-      const prompt = `請將以下英文冷知識內容翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋、標題或英文原文：\n\n${englishText}`;
-
-      const payload = {
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      };
-
-      const response = UrlFetchApp.fetch(url, {
-        method: "post",
-        contentType: "application/json",
-        payload: JSON.stringify(payload),
-        muteHttpExceptions: true,
-      });
-
-      const statusCode = response.getResponseCode();
-      if (statusCode !== 200) {
-        throw new Error(`Gemini API Error (${statusCode}): ${response.getContentText()}`);
-      }
-
-      const result = JSON.parse(response.getContentText());
-      const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (!chineseText) {
-        throw new Error("Failed to parse response from Gemini API.");
-      }
-
-      return chineseText.trim();
-    }, 16, 20000);
-  } catch (err: any) {
-    const errorMsg = err?.message || String(err);
-    sendTextPushNotification(`❌ [Gemini API 錯誤] 翻譯重試 16 次後依然全部失敗！錯誤原因：${errorMsg}`);
-    throw err;
-  }
-}
-
-/**
  * Helper to construct the LINE Flex Message payload.
  */
 function buildFlexMessagePayload(
   altText: string,
-  chineseText: string,
-  englishText?: string | null,
+  text: string,
   imageUrl?: string | null
 ): object {
   const finalAltText = altText && altText.trim().length > 0 ? altText.trim() : "有一則新訊息";
 
-  let flexObj: any;
+  const jsonStr = flexTemplateString.replace(
+    "{{TEXT}}",
+    text.replace(/"/g, '\\"').replace(/\n/g, "\\n")
+  );
 
-  if (englishText && englishText.trim().length > 0) {
-    const jsonStr = flexTemplateString
-      .replace("{{CHINESE_TEXT}}", chineseText.replace(/"/g, '\\"').replace(/\n/g, "\\n"))
-      .replace("{{ENGLISH_TEXT}}", englishText.replace(/"/g, '\\"').replace(/\n/g, "\\n"));
-    flexObj = JSON.parse(jsonStr);
-  } else {
-    flexObj = {
-      type: "bubble",
-      size: "mega",
-      body: {
-        type: "box",
-        layout: "vertical",
-        backgroundColor: "#FFFFFF",
-        cornerRadius: "xl",
-        paddingAll: "xxl",
-        contents: [
-          {
-            type: "text",
-            text: chineseText,
-            wrap: true,
-            size: "md",
-            color: "#1C1B1F",
-            lineSpacing: "10px"
-          }
-        ]
-      }
-    };
-  }
+  const flexObj = JSON.parse(jsonStr);
 
   if (imageUrl && (imageUrl.startsWith("http://") || imageUrl.startsWith("https://"))) {
     flexObj.hero = {
@@ -493,7 +393,7 @@ function buildFlexMessagePayload(
 
 /**
  * Function 2: Daily automated function to randomly select a 'PENDING' row from Google Sheet,
- * translate via Gemini if Column F requires it, broadcast via LINE Flex Message, and update Status to 'SENT'.
+ * broadcast via LINE Flex Message, and update Status to 'SENT'.
  */
 function dailyBroadcastFromSheet(): void {
   console.log("=== Starting Daily Broadcast From Sheet ===");
@@ -506,23 +406,12 @@ function dailyBroadcastFromSheet(): void {
     return;
   }
 
-  const { rowIndex, text, imageUrl, lineAlert, shouldTranslate } = pendingFact;
+  const { rowIndex, text, imageUrl, lineAlert } = pendingFact;
 
   console.log(`[Daily Broadcast] Processing Row ${rowIndex}: Content="${text.substring(0, 30)}..."`);
 
   const altText = lineAlert || "有一則新訊息";
-  let chineseText = "";
-  let englishText: string | null = null;
-
-  if (shouldTranslate) {
-    chineseText = translateWithGemini(text);
-    englishText = text;
-  } else {
-    chineseText = text;
-    englishText = null;
-  }
-
-  const flexMessage = buildFlexMessagePayload(altText, chineseText, englishText, imageUrl);
+  const flexMessage = buildFlexMessagePayload(altText, text, imageUrl);
 
   const props = PropertiesService.getScriptProperties().getProperties();
   const tokens: string[] = [];
@@ -612,30 +501,19 @@ function testPushToMe(): void {
     return;
   }
 
-  const { rowIndex, text, imageUrl, lineAlert, shouldTranslate } = pendingFact;
+  const { rowIndex, text, imageUrl, lineAlert } = pendingFact;
 
   console.log(`[Test Push] Processing Row ${rowIndex}: Content="${text.substring(0, 30)}..."`);
 
   const altText = lineAlert || "有一則新訊息";
-  let chineseText = "";
-  let englishText: string | null = null;
-
-  if (shouldTranslate) {
-    chineseText = translateWithGemini(text);
-    englishText = text;
-  } else {
-    chineseText = text;
-    englishText = null;
-  }
 
   console.log("=== Test Push Console Log ===");
   console.log(`Row Index: ${rowIndex}`);
   console.log(`Line Alert (altText): ${altText}`);
-  console.log(`Original Text: ${text}`);
+  console.log(`Text Content: ${text}`);
   console.log(`Image URL: ${imageUrl || "None"}`);
-  console.log(`Gemini Chinese Translation: ${chineseText}`);
 
-  const flexMessage = buildFlexMessagePayload(altText, chineseText, englishText, imageUrl);
+  const flexMessage = buildFlexMessagePayload(altText, text, imageUrl);
 
   withRetry(() => {
     const pushUrl = "https://api.line.me/v2/bot/message/push";
@@ -669,7 +547,6 @@ function testPushToMe(): void {
 (globalThis as any).scrapeAndSaveToSheet = scrapeAndSaveToSheet;
 (globalThis as any).dailyBroadcastFromSheet = dailyBroadcastFromSheet;
 (globalThis as any).testPushToMe = testPushToMe;
-(globalThis as any).translateWithGemini = translateWithGemini;
 (globalThis as any).sendTextPushNotification = sendTextPushNotification;
 (globalThis as any).getRandomPendingFact = getRandomPendingFact;
 (globalThis as any).getFirstPendingFact = getFirstPendingFact;
