@@ -52,6 +52,14 @@ interface FactResult {
   targetUrl?: string;
 }
 
+interface PendingFact {
+  rowIndex: number;
+  text: string;
+  imageUrl: string;
+  lineAlert: string;
+  shouldTranslate: boolean;
+}
+
 /**
  * Strips HTML tags and unescapes common HTML entities.
  */
@@ -150,6 +158,54 @@ function sendTextPushNotification(messageText: string): void {
   } catch (err: any) {
     console.error(`❌ Failed to send text push notification: ${err?.message || err}`);
   }
+}
+
+/**
+ * Gets or opens the active Google Sheet instance.
+ */
+function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
+  const props = PropertiesService.getScriptProperties();
+  const spreadsheetId = props.getProperty("SPREADSHEET_ID");
+  if (!spreadsheetId) {
+    throw new Error("SPREADSHEET_ID script property is not configured.");
+  }
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  return ss.getSheets()[0];
+}
+
+/**
+ * Modular helper function to find and return the first 'PENDING' record from the Google Sheet.
+ */
+function getFirstPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): PendingFact | null {
+  const data = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < data.length; i++) {
+    const status = data[i][2]; // Column C is Status
+    if (status && String(status).trim().toUpperCase() === "PENDING") {
+      const text = String(data[i][0] || "").trim(); // Column A
+      if (!text) continue;
+
+      const imageUrl = String(data[i][1] || "").trim(); // Column B
+      const lineAlert = String(data[i][4] || "").trim(); // Column E
+
+      let shouldTranslate = true;
+      const translateVal = data[i][5]; // Column F
+      if (translateVal !== undefined && translateVal !== null && translateVal !== "") {
+        const trStr = String(translateVal).trim().toLowerCase();
+        shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
+      }
+
+      return {
+        rowIndex: i + 1, // 1-based row index
+        text,
+        imageUrl,
+        lineAlert,
+        shouldTranslate,
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -259,19 +315,6 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
 }
 
 /**
- * Gets or opens the active Google Sheet instance.
- */
-function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
-  const props = PropertiesService.getScriptProperties();
-  const spreadsheetId = props.getProperty("SPREADSHEET_ID");
-  if (!spreadsheetId) {
-    throw new Error("SPREADSHEET_ID script property is not configured.");
-  }
-  const ss = SpreadsheetApp.openById(spreadsheetId);
-  return ss.getSheets()[0];
-}
-
-/**
  * Function 1: Batch scrape target website URLs and save new facts into Google Sheet.
  * Schema: Column A (English Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert), Column F (Translate)
  */
@@ -368,7 +411,7 @@ function translateWithGemini(englishText: string): string {
     }, 16, 20000);
   } catch (err: any) {
     const errorMsg = err?.message || String(err);
-    sendTextPushNotification(`❌ [Gemini API 嚴重錯誤] 翻譯重試 16 次後依然全部失敗！錯誤原因：${errorMsg}`);
+    sendTextPushNotification(`❌ [Gemini API 錯誤] 翻譯重試 16 次後依然全部失敗！錯誤原因：${errorMsg}`);
     throw err;
   }
 }
@@ -441,41 +484,17 @@ function buildFlexMessagePayload(
 function dailyBroadcastFromSheet(): void {
   console.log("=== Starting Daily Broadcast From Sheet ===");
   const sheet = getSheet();
-  const data = sheet.getDataRange().getValues();
+  const pendingFact = getFirstPendingFact(sheet);
 
-  let targetRowIndex = -1;
-  let text = "";
-  let imageUrl = "";
-  let lineAlert = "";
-  let shouldTranslate = true;
-
-  // Find the first row where Column C === 'PENDING'
-  for (let i = 1; i < data.length; i++) {
-    const status = data[i][2]; // Column C is Status
-    if (status && String(status).trim().toUpperCase() === "PENDING") {
-      targetRowIndex = i + 1; // 1-based row index in Spreadsheet
-      text = String(data[i][0] || "").trim(); // Column A
-      imageUrl = String(data[i][1] || "").trim(); // Column B
-      lineAlert = String(data[i][4] || "").trim(); // Column E
-
-      const translateVal = data[i][5]; // Column F
-      if (translateVal !== undefined && translateVal !== null && translateVal !== "") {
-        const trStr = String(translateVal).trim().toLowerCase();
-        shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
-      } else {
-        shouldTranslate = true;
-      }
-      break;
-    }
-  }
-
-  if (targetRowIndex === -1 || !text) {
+  if (!pendingFact) {
     console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
     sendTextPushNotification("⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送，請盡快補充新內容！");
     return;
   }
 
-  console.log(`[Daily Broadcast] Processing Row ${targetRowIndex}: Content="${text.substring(0, 30)}..."`);
+  const { rowIndex, text, imageUrl, lineAlert, shouldTranslate } = pendingFact;
+
+  console.log(`[Daily Broadcast] Processing Row ${rowIndex}: Content="${text.substring(0, 30)}..."`);
 
   const altText = lineAlert || "有一則新訊息";
   let chineseText = "";
@@ -531,10 +550,10 @@ function dailyBroadcastFromSheet(): void {
 
   // Update sheet: Column C -> 'SENT', Column D -> ISO Timestamp
   const nowTimestamp = new Date().toISOString();
-  sheet.getRange(targetRowIndex, 3).setValue("SENT"); // Column C
-  sheet.getRange(targetRowIndex, 4).setValue(nowTimestamp); // Column D
+  sheet.getRange(rowIndex, 3).setValue("SENT"); // Column C
+  sheet.getRange(rowIndex, 4).setValue(nowTimestamp); // Column D
 
-  console.log(`=== Daily Broadcast Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
+  console.log(`=== Daily Broadcast Successful! Updated Row ${rowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 
 /**
@@ -571,41 +590,17 @@ function testPushToMe(): void {
   }
 
   const sheet = getSheet();
-  const data = sheet.getDataRange().getValues();
+  const pendingFact = getFirstPendingFact(sheet);
 
-  let targetRowIndex = -1;
-  let text = "";
-  let imageUrl = "";
-  let lineAlert = "";
-  let shouldTranslate = true;
-
-  // Find the first row where Column C === 'PENDING'
-  for (let i = 1; i < data.length; i++) {
-    const status = data[i][2]; // Column C is Status
-    if (status && String(status).trim().toUpperCase() === "PENDING") {
-      targetRowIndex = i + 1; // 1-based row index in Spreadsheet
-      text = String(data[i][0] || "").trim(); // Column A
-      imageUrl = String(data[i][1] || "").trim(); // Column B
-      lineAlert = String(data[i][4] || "").trim(); // Column E
-
-      const translateVal = data[i][5]; // Column F
-      if (translateVal !== undefined && translateVal !== null && translateVal !== "") {
-        const trStr = String(translateVal).trim().toLowerCase();
-        shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
-      } else {
-        shouldTranslate = true;
-      }
-      break;
-    }
-  }
-
-  if (targetRowIndex === -1 || !text) {
+  if (!pendingFact) {
     console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
     sendTextPushNotification("⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送，請盡快補充新內容！");
     return;
   }
 
-  console.log(`[Test Push] Processing Row ${targetRowIndex}: Content="${text.substring(0, 30)}..."`);
+  const { rowIndex, text, imageUrl, lineAlert, shouldTranslate } = pendingFact;
+
+  console.log(`[Test Push] Processing Row ${rowIndex}: Content="${text.substring(0, 30)}..."`);
 
   const altText = lineAlert || "有一則新訊息";
   let chineseText = "";
@@ -620,7 +615,7 @@ function testPushToMe(): void {
   }
 
   console.log("=== Test Push Console Log ===");
-  console.log(`Row Index: ${targetRowIndex}`);
+  console.log(`Row Index: ${rowIndex}`);
   console.log(`Line Alert (altText): ${altText}`);
   console.log(`Original Text: ${text}`);
   console.log(`Image URL: ${imageUrl || "None"}`);
@@ -651,10 +646,10 @@ function testPushToMe(): void {
 
   // Update sheet: Column C -> 'SENT', Column D -> ISO Timestamp upon successful push
   const nowTimestamp = new Date().toISOString();
-  sheet.getRange(targetRowIndex, 3).setValue("SENT"); // Column C
-  sheet.getRange(targetRowIndex, 4).setValue(nowTimestamp); // Column D
+  sheet.getRange(rowIndex, 3).setValue("SENT"); // Column C
+  sheet.getRange(rowIndex, 4).setValue(nowTimestamp); // Column D
 
-  console.log(`=== Test Push Successful! Updated Row ${targetRowIndex} Status to SENT at ${nowTimestamp} ===`);
+  console.log(`=== Test Push Successful! Updated Row ${rowIndex} Status to SENT at ${nowTimestamp} ===`);
 }
 
 (globalThis as any).scrapeAndSaveToSheet = scrapeAndSaveToSheet;
@@ -662,3 +657,4 @@ function testPushToMe(): void {
 (globalThis as any).testPushToMe = testPushToMe;
 (globalThis as any).translateWithGemini = translateWithGemini;
 (globalThis as any).sendTextPushNotification = sendTextPushNotification;
+(globalThis as any).getFirstPendingFact = getFirstPendingFact;
