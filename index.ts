@@ -174,10 +174,12 @@ function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
 }
 
 /**
- * Modular helper function to find and return the first 'PENDING' record from the Google Sheet.
+ * Modular helper function to collect all 'PENDING' records from the Google Sheet
+ * and select one randomly. Returns null if no PENDING records are found.
  */
-function getFirstPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): PendingFact | null {
+function getRandomPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): PendingFact | null {
   const data = sheet.getDataRange().getValues();
+  const pendingFacts: PendingFact[] = [];
 
   for (let i = 1; i < data.length; i++) {
     const status = data[i][2]; // Column C is Status
@@ -195,17 +197,29 @@ function getFirstPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): Pending
         shouldTranslate = trStr === "1" || trStr === "true" || translateVal === true || translateVal === 1;
       }
 
-      return {
-        rowIndex: i + 1, // 1-based row index
+      pendingFacts.push({
+        rowIndex: i + 1, // 1-based row index in Spreadsheet
         text,
         imageUrl,
         lineAlert,
         shouldTranslate,
-      };
+      });
     }
   }
 
-  return null;
+  if (pendingFacts.length === 0) {
+    return null;
+  }
+
+  const randomIndex = Math.floor(Math.random() * pendingFacts.length);
+  return pendingFacts[randomIndex];
+}
+
+/**
+ * Legacy alias maintained for backwards compatibility.
+ */
+function getFirstPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): PendingFact | null {
+  return getRandomPendingFact(sheet);
 }
 
 /**
@@ -478,13 +492,13 @@ function buildFlexMessagePayload(
 }
 
 /**
- * Function 2: Daily automated function to read the first 'PENDING' row from Google Sheet,
+ * Function 2: Daily automated function to randomly select a 'PENDING' row from Google Sheet,
  * translate via Gemini if Column F requires it, broadcast via LINE Flex Message, and update Status to 'SENT'.
  */
 function dailyBroadcastFromSheet(): void {
   console.log("=== Starting Daily Broadcast From Sheet ===");
   const sheet = getSheet();
-  const pendingFact = getFirstPendingFact(sheet);
+  const pendingFact = getRandomPendingFact(sheet);
 
   if (!pendingFact) {
     console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
@@ -557,7 +571,7 @@ function dailyBroadcastFromSheet(): void {
 }
 
 /**
- * Developer test function to push the first 'PENDING' fact to MY_LINE_USER_ID
+ * Developer test function to push a randomly selected 'PENDING' fact to MY_LINE_USER_ID
  * and update its status to 'SENT' with Sent Timestamp upon successful push.
  */
 function testPushToMe(): void {
@@ -590,7 +604,7 @@ function testPushToMe(): void {
   }
 
   const sheet = getSheet();
-  const pendingFact = getFirstPendingFact(sheet);
+  const pendingFact = getRandomPendingFact(sheet);
 
   if (!pendingFact) {
     console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
@@ -657,4 +671,5 @@ function testPushToMe(): void {
 (globalThis as any).testPushToMe = testPushToMe;
 (globalThis as any).translateWithGemini = translateWithGemini;
 (globalThis as any).sendTextPushNotification = sendTextPushNotification;
+(globalThis as any).getRandomPendingFact = getRandomPendingFact;
 (globalThis as any).getFirstPendingFact = getFirstPendingFact;
