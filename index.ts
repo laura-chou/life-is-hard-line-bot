@@ -93,6 +93,66 @@ function withRetry<T>(fn: () => T, maxAttempts: number = 16, delayMs: number = 2
 }
 
 /**
+ * Sends a plain text push notification to the developer (MY_LINE_USER_ID) for alerts/errors.
+ */
+function sendTextPushNotification(messageText: string): void {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const userId = props.getProperty("MY_LINE_USER_ID");
+    if (!userId) {
+      console.warn("⚠️ [Push Alert Warning] MY_LINE_USER_ID is not configured.");
+      return;
+    }
+
+    const allProps = props.getProperties();
+    let token = "";
+    for (const key of Object.keys(allProps)) {
+      if (key.startsWith("LINE_CHANNEL_ACCESS_TOKEN_2")) {
+        token = allProps[key];
+        break;
+      }
+    }
+
+    if (!token) {
+      for (const key of Object.keys(allProps)) {
+        if (key.startsWith("LINE_CHANNEL_ACCESS_TOKEN")) {
+          token = allProps[key];
+          break;
+        }
+      }
+    }
+
+    if (!token) {
+      console.warn("⚠️ [Push Alert Warning] No LINE_CHANNEL_ACCESS_TOKEN found.");
+      return;
+    }
+
+    const pushUrl = "https://api.line.me/v2/bot/message/push";
+    const response = UrlFetchApp.fetch(pushUrl, {
+      method: "post",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      payload: JSON.stringify({
+        to: userId,
+        messages: [
+          {
+            type: "text",
+            text: messageText,
+          },
+        ],
+      }),
+      muteHttpExceptions: true,
+    });
+
+    console.log(`[Text Push Alert API] Status Code: ${response.getResponseCode()}, Body: ${response.getContentText()}`);
+  } catch (err: any) {
+    console.error(`❌ Failed to send text push notification: ${err?.message || err}`);
+  }
+}
+
+/**
  * Scrapes facts from a single specified target URL.
  * Extracts all candidate items (<p class="list"> and <h2 class="list"> blocks) into full text format.
  */
@@ -258,52 +318,59 @@ function scrapeAndSaveToSheet(): void {
 
 /**
  * Translates English fact text into Taiwan Traditional Chinese using Gemini API (gemini-3.8-flash) with retry logic.
+ * Sends push alert notification upon 16 consecutive failures.
  */
 function translateWithGemini(englishText: string): string {
-  return withRetry(() => {
-    const props = PropertiesService.getScriptProperties();
-    const apiKey = props.getProperty("GEMINI_API_KEY");
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY script property is not configured.");
-    }
+  try {
+    return withRetry(() => {
+      const props = PropertiesService.getScriptProperties();
+      const apiKey = props.getProperty("GEMINI_API_KEY");
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY script property is not configured.");
+      }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
-    const prompt = `請將以下英文冷知識內容翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋、標題或英文原文：\n\n${englishText}`;
+      const prompt = `請將以下英文冷知識內容翻譯成台灣日常繁體中文，語氣要生動、吸引人且適合社群分享。只需輸出翻譯後的中文內容，不要附加任何解釋、標題或英文原文：\n\n${englishText}`;
 
-    const payload = {
-      contents: [
-        {
-          parts: [
-            {
-              text: prompt,
-            },
-          ],
-        },
-      ],
-    };
+      const payload = {
+        contents: [
+          {
+            parts: [
+              {
+                text: prompt,
+              },
+            ],
+          },
+        ],
+      };
 
-    const response = UrlFetchApp.fetch(url, {
-      method: "post",
-      contentType: "application/json",
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true,
-    });
+      const response = UrlFetchApp.fetch(url, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true,
+      });
 
-    const statusCode = response.getResponseCode();
-    if (statusCode !== 200) {
-      throw new Error(`Gemini API Error (${statusCode}): ${response.getContentText()}`);
-    }
+      const statusCode = response.getResponseCode();
+      if (statusCode !== 200) {
+        throw new Error(`Gemini API Error (${statusCode}): ${response.getContentText()}`);
+      }
 
-    const result = JSON.parse(response.getContentText());
-    const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+      const result = JSON.parse(response.getContentText());
+      const chineseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!chineseText) {
-      throw new Error("Failed to parse response from Gemini API.");
-    }
+      if (!chineseText) {
+        throw new Error("Failed to parse response from Gemini API.");
+      }
 
-    return chineseText.trim();
-  }, 16, 20000);
+      return chineseText.trim();
+    }, 16, 20000);
+  } catch (err: any) {
+    const errorMsg = err?.message || String(err);
+    sendTextPushNotification(`❌ [Gemini API 嚴重錯誤] 翻譯重試 16 次後依然全部失敗！錯誤原因：${errorMsg}`);
+    throw err;
+  }
 }
 
 /**
@@ -404,6 +471,7 @@ function dailyBroadcastFromSheet(): void {
 
   if (targetRowIndex === -1 || !text) {
     console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
+    sendTextPushNotification("⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送，請盡快補充新內容！");
     return;
   }
 
@@ -533,6 +601,7 @@ function testPushToMe(): void {
 
   if (targetRowIndex === -1 || !text) {
     console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
+    sendTextPushNotification("⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送，請盡快補充新內容！");
     return;
   }
 
@@ -592,3 +661,4 @@ function testPushToMe(): void {
 (globalThis as any).dailyBroadcastFromSheet = dailyBroadcastFromSheet;
 (globalThis as any).testPushToMe = testPushToMe;
 (globalThis as any).translateWithGemini = translateWithGemini;
+(globalThis as any).sendTextPushNotification = sendTextPushNotification;
