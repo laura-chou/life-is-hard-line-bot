@@ -37,6 +37,11 @@ const factPaths: string[] = [
 
 const factUrls: string[] = factPaths.map(path => `${BASE_DOMAIN}${path}`);
 
+const warningMessage = {
+  "en": "⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.",
+  "ch": "⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送"
+}
+
 interface FactResult {
   text: string; // Full text stored in Column A
   imageUrl?: string | null;
@@ -434,8 +439,8 @@ function dailyBroadcastFromSheet(): void {
   const pendingFact = getRandomPendingFact(sheet);
 
   if (!pendingFact) {
-    console.warn("⚠️ [Daily Broadcast Warning] No 'PENDING' fact records found in Google Sheet.");
-    sendTextPushNotification("⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送，請盡快補充新內容！");
+    console.warn(warningMessage.en);
+    sendTextPushNotification(warningMessage.ch);
     return;
   }
 
@@ -529,8 +534,8 @@ function testPushToMe(): void {
   const pendingFact = getRandomPendingFact(sheet);
 
   if (!pendingFact) {
-    console.warn("⚠️ [Test Push Warning] No 'PENDING' fact records found in Google Sheet.");
-    sendTextPushNotification("⚠️ [LINE Bot 提醒] Google 試算表中的所有內容狀態皆已為 SENT，目前已無 PENDING 資料可供發送，請盡快補充新內容！");
+    console.warn(warningMessage.en);
+    sendTextPushNotification(warningMessage.ch);
     return;
   }
 
@@ -571,7 +576,7 @@ function testPushToMe(): void {
   });
 
   // Update sheet: Column C -> 'SENT', Column D -> ISO Timestamp upon successful push
-  const nowTimestamp = new Date().toISOString();
+  const nowTimestamp = Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy-MM-dd HH:mm:ss");
   sheet.getRange(rowIndex, 3).setValue("SENT"); // Column C
   sheet.getRange(rowIndex, 4).setValue(nowTimestamp); // Column D
 
