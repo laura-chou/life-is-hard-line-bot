@@ -48,6 +48,7 @@ interface PendingFact {
   text: string;
   imageUrl: string;
   lineAlert: string;
+  targetDate: string;
 }
 
 /**
@@ -163,13 +164,19 @@ function getSheet(): GoogleAppsScript.Spreadsheet.Sheet {
 }
 
 /**
- * Modular helper function to collect all 'PENDING' records from the Google Sheet
- * and select one randomly. Returns null if no PENDING records are found.
- * Schema: Column A (Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert)
+ * Modular helper function to find and return a pending record from the Google Sheet.
+ * Checks Phase 1 (matching today's Target Date "MM/DD") first, then Phase 2 (empty Target Date).
+ * Returns null if no eligible PENDING records are found.
+ * Schema: Column A (Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert), Column F (Target Date)
  */
 function getRandomPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): PendingFact | null {
   const data = sheet.getDataRange().getValues();
-  const pendingFacts: PendingFact[] = [];
+  const now = new Date();
+  const todayMMdd = Utilities.formatDate(now, "Asia/Taipei", "MM/dd");
+  const todayMd = Utilities.formatDate(now, "Asia/Taipei", "M/d");
+
+  const todayMatchedFacts: PendingFact[] = [];
+  const noDateFacts: PendingFact[] = [];
 
   for (let i = 1; i < data.length; i++) {
     const status = data[i][2]; // Column C is Status
@@ -179,22 +186,48 @@ function getRandomPendingFact(sheet: GoogleAppsScript.Spreadsheet.Sheet): Pendin
 
       const imageUrl = String(data[i][1] || "").trim(); // Column B
       const lineAlert = String(data[i][4] || "").trim(); // Column E
+      const targetDateVal = data[i][5]; // Column F
 
-      pendingFacts.push({
+      let targetDateStr = "";
+      if (targetDateVal instanceof Date) {
+        targetDateStr = Utilities.formatDate(targetDateVal, "Asia/Taipei", "MM/dd");
+      } else if (targetDateVal !== undefined && targetDateVal !== null) {
+        targetDateStr = String(targetDateVal).trim();
+      }
+
+      const factItem: PendingFact = {
         rowIndex: i + 1, // 1-based row index in Spreadsheet
         text,
         imageUrl,
         lineAlert,
-      });
+        targetDate: targetDateStr,
+      };
+
+      if (targetDateStr !== "") {
+        if (targetDateStr === todayMMdd || targetDateStr === todayMd) {
+          todayMatchedFacts.push(factItem);
+        }
+      } else {
+        noDateFacts.push(factItem);
+      }
     }
   }
 
-  if (pendingFacts.length === 0) {
-    return null;
+  // Phase 1: Check for PENDING records matching today's Target Date (Asia/Taipei)
+  if (todayMatchedFacts.length > 0) {
+    console.log(`[Pending Fact Selector] Phase 1 matched ${todayMatchedFacts.length} fact(s) for today (${todayMMdd}).`);
+    const randomIndex = Math.floor(Math.random() * todayMatchedFacts.length);
+    return todayMatchedFacts[randomIndex];
   }
 
-  const randomIndex = Math.floor(Math.random() * pendingFacts.length);
-  return pendingFacts[randomIndex];
+  // Phase 2: Fallback to PENDING records with no Target Date specified
+  if (noDateFacts.length > 0) {
+    console.log(`[Pending Fact Selector] Phase 2 fallback matched ${noDateFacts.length} fact(s) with no Target Date.`);
+    const randomIndex = Math.floor(Math.random() * noDateFacts.length);
+    return noDateFacts[randomIndex];
+  }
+
+  return null;
 }
 
 /**
@@ -312,7 +345,7 @@ function scrapeUrlFacts(targetUrl: string): FactResult[] {
 
 /**
  * Function 1: Batch scrape target website URLs and save new facts into Google Sheet.
- * Schema: Column A (Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert)
+ * Schema: Column A (Text), Column B (Image URL), Column C (Status), Column D (Sent Timestamp), Column E (Line Alert), Column F (Target Date)
  */
 function scrapeAndSaveToSheet(): void {
   console.log("=== Starting Batch Scrape & Save to Sheet ===");
@@ -341,8 +374,8 @@ function scrapeAndSaveToSheet(): void {
         if (!existingTexts.has(normalizedText)) {
           const imageUrlStr = item.imageUrl || "";
 
-          // Append new row: Column A=Text, B=Image URL, C=Status("PENDING"), D=Sent Timestamp(""), E=Line Alert("")
-          sheet.appendRow([item.text, imageUrlStr, "PENDING", "", ""]);
+          // Append new row: Column A=Text, B=Image URL, C=Status("PENDING"), D=Sent Timestamp(""), E=Line Alert(""), F=Target Date("")
+          sheet.appendRow([item.text, imageUrlStr, "PENDING", "", "", ""]);
           existingTexts.add(normalizedText);
           totalNewAdded++;
         }
@@ -392,7 +425,7 @@ function buildFlexMessagePayload(
 }
 
 /**
- * Function 2: Daily automated function to randomly select a 'PENDING' row from Google Sheet,
+ * Function 2: Daily automated function to select a 'PENDING' row from Google Sheet (checking today's Target Date first),
  * broadcast via LINE Flex Message, and update Status to 'SENT'.
  */
 function dailyBroadcastFromSheet(): void {
@@ -406,9 +439,9 @@ function dailyBroadcastFromSheet(): void {
     return;
   }
 
-  const { rowIndex, text, imageUrl, lineAlert } = pendingFact;
+  const { rowIndex, text, imageUrl, lineAlert, targetDate } = pendingFact;
 
-  console.log(`[Daily Broadcast] Processing Row ${rowIndex}: Content="${text.substring(0, 30)}..."`);
+  console.log(`[Daily Broadcast] Processing Row ${rowIndex} (Target Date: "${targetDate || "None"}"): Content="${text.substring(0, 30)}..."`);
 
   const altText = lineAlert || "有一則新訊息";
   const flexMessage = buildFlexMessagePayload(altText, text, imageUrl);
@@ -460,7 +493,7 @@ function dailyBroadcastFromSheet(): void {
 }
 
 /**
- * Developer test function to push a randomly selected 'PENDING' fact to MY_LINE_USER_ID
+ * Developer test function to push a selected 'PENDING' fact (checking today's Target Date first) to MY_LINE_USER_ID
  * and update its status to 'SENT' with Sent Timestamp upon successful push.
  */
 function testPushToMe(): void {
@@ -501,14 +534,15 @@ function testPushToMe(): void {
     return;
   }
 
-  const { rowIndex, text, imageUrl, lineAlert } = pendingFact;
+  const { rowIndex, text, imageUrl, lineAlert, targetDate } = pendingFact;
 
-  console.log(`[Test Push] Processing Row ${rowIndex}: Content="${text.substring(0, 30)}..."`);
+  console.log(`[Test Push] Processing Row ${rowIndex} (Target Date: "${targetDate || "None"}"): Content="${text.substring(0, 30)}..."`);
 
   const altText = lineAlert || "有一則新訊息";
 
   console.log("=== Test Push Console Log ===");
   console.log(`Row Index: ${rowIndex}`);
+  console.log(`Target Date: ${targetDate || "None"}`);
   console.log(`Line Alert (altText): ${altText}`);
   console.log(`Text Content: ${text}`);
   console.log(`Image URL: ${imageUrl || "None"}`);
