@@ -1,18 +1,14 @@
 {
   "name": "life_is_hard_line_bot",
-  "version": "2.0.0",
-  "description": "robot",
-  "license": "ISC",
-  "author": "laura-chou",
-  "type": "module",
+  "version": "1.0.0",
+  "description": "LINE Bot that fetches daily facts, translates them via Gemini API, broadcasts Flex Messages, and logs history in Google Sheets.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "build": "tsc",
+    "push": "npm run build && clasp push"
   },
-  "dependencies": {
-    "axios": "^1.12.2",
-    "dotenv": "^17.2.3",
-    "nodemon": "^3.1.10"
+  "devDependencies": {
+    "@types/google-apps-script": "^1.0.83",
+    "typescript": "^5.8.2"
   }
 }
